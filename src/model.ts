@@ -2,7 +2,7 @@ import { blockUntilReady, jit, nn, numpy as np } from "@jax-js/jax";
 import { safetensors, WeightMapper } from "@jax-js/loaders";
 
 export const MODEL_URL =
-  "https://github.com/gustofied/kalkulator/releases/download/model-v1/model-fp16.safetensors";
+  "https://huggingface.co/gustofied/kalkulator/resolve/main/model-fp16.safetensors";
 export const TOKENIZER_URL =
   "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/main/tokenizer.json";
 
