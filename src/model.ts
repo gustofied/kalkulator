@@ -117,7 +117,11 @@ function applyValueEmbedding(
   valueEmbeds: np.Array,
   values: np.Array,
 ): np.Array {
-  const channels = np.take(hidden, np.arange(12), -1);
+  const channels = np.take(
+    hidden,
+    np.arange(12, undefined, undefined, { dtype: np.uint32 }),
+    -1,
+  );
   const gate = nn.sigmoid(np.dot(channels, attn.veGate!.transpose())).mul(2);
   return values.add(gate.reshape([hidden.shape[0], C.kvHeads, 1]).mul(valueEmbeds));
 }
@@ -143,7 +147,11 @@ function applyXsa(attn: Attention, output: np.Array, currentValues: np.Array): n
 }
 
 function applyAttentionGate(attn: Attention, hidden: np.Array, output: np.Array): np.Array {
-  const channels = np.take(hidden, np.arange(128), -1);
+  const channels = np.take(
+    hidden,
+    np.arange(128, undefined, undefined, { dtype: np.uint32 }),
+    -1,
+  );
   const gate = nn.sigmoid(np.dot(channels, attn.attnGate.transpose())).mul(2);
   return output.mul(gate.reshape([hidden.shape[0], C.heads, 1]));
 }
@@ -349,10 +357,13 @@ const runMuddPair = jit(
       const weights = np
         .dot(inner.ref, dense2.slice(layerIndex).transpose())
         .add(bias.slice(layerIndex));
+      const i0 = np.array(0, { dtype: np.uint32 });
+      const i1 = np.array(1, { dtype: np.uint32 });
+      const i2 = np.array(2, { dtype: np.uint32 });
       return tap0
-        .mul(np.take(weights.ref, 0, -1).reshape([current.shape[0], 1]))
-        .add(tap1.mul(np.take(weights.ref, 1, -1).reshape([current.shape[0], 1])))
-        .add(tap2.mul(np.take(weights, 2, -1).reshape([current.shape[0], 1])));
+        .mul(np.take(weights.ref, i0, -1).reshape([current.shape[0], 1]))
+        .add(tap1.mul(np.take(weights.ref, i1, -1).reshape([current.shape[0], 1])))
+        .add(tap2.mul(np.take(weights, i2, -1).reshape([current.shape[0], 1])));
     };
     return [
       makeMix(mudd.dense2, mudd.bias),
