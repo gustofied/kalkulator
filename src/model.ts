@@ -1,4 +1,4 @@
-import { blockUntilReady, jit, nn, numpy as np } from "@jax-js/jax";
+import { blockUntilReady, jit, nn, numpy as np, tree } from "@jax-js/jax";
 import { safetensors, WeightMapper } from "@jax-js/loaders";
 
 export const MODEL_URL =
@@ -276,7 +276,6 @@ function padCache(key: np.Array, value: np.Array, capacity: number): KV {
 const runLayerPrefill = jit(
   function runLayerPrefill(
     layer: Layer,
-    hidden: np.Array,
     attentionInput: np.Array,
     residualBase: np.Array,
     valueEmbeds: np.Array,
@@ -300,14 +299,13 @@ const runLayerPrefill = jit(
       .add(mlp.mul(layer.postLambdaMlp));
     return [result, padCache(key, value, capacity)];
   },
-  { staticArgnums: [5, 6, 7] },
+  { staticArgnums: [4, 5, 6] },
 );
 
 const runLayerStep = jit(
   function runLayerStep(
     layer: Layer,
     cache: KV,
-    hidden: np.Array,
     attentionInput: np.Array,
     residualBase: np.Array,
     valueEmbeds: np.Array,
@@ -337,7 +335,7 @@ const runLayerStep = jit(
       .add(mlp.mul(layer.postLambdaMlp));
     return [result, nextCache];
   },
-  { staticArgnums: [9, 10] },
+  { staticArgnums: [8, 9] },
 );
 
 const runMuddPair = jit(
@@ -349,25 +347,36 @@ const runMuddPair = jit(
     current: np.Array,
     layerIndex: number,
   ): [np.Array, np.Array] {
+    const T = current.shape[0];
     const inner = nn.gelu(
       np.dot(rmsNorm(current), mudd.dense1.transpose()),
       { approximate: false },
     );
-    const makeMix = (dense2: np.Array, bias: np.Array): np.Array => {
+    const makeMix = (
+      dense2: np.Array,
+      bias: np.Array,
+      retainInputs: boolean,
+    ): np.Array => {
       const weights = np
-        .dot(inner.ref, dense2.slice(layerIndex).transpose())
+        .dot(
+          retainInputs ? inner.ref : inner,
+          dense2.slice(layerIndex).transpose(),
+        )
         .add(bias.slice(layerIndex));
       const i0 = np.array(0, { dtype: np.uint32 });
       const i1 = np.array(1, { dtype: np.uint32 });
       const i2 = np.array(2, { dtype: np.uint32 });
-      return tap0
-        .mul(np.take(weights.ref, i0, -1).reshape([current.shape[0], 1]))
-        .add(tap1.mul(np.take(weights.ref, i1, -1).reshape([current.shape[0], 1])))
-        .add(tap2.mul(np.take(weights, i2, -1).reshape([current.shape[0], 1])));
+      const a = retainInputs ? tap0.ref : tap0;
+      const b = retainInputs ? tap1.ref : tap1;
+      const c = retainInputs ? tap2.ref : tap2;
+      return a
+        .mul(np.take(weights.ref, i0, -1).reshape([T, 1]))
+        .add(b.mul(np.take(weights.ref, i1, -1).reshape([T, 1])))
+        .add(c.mul(np.take(weights, i2, -1).reshape([T, 1])));
     };
     return [
-      makeMix(mudd.dense2, mudd.bias),
-      makeMix(mudd.dense2Mlp, mudd.biasMlp),
+      makeMix(mudd.dense2, mudd.bias, true),
+      makeMix(mudd.dense2Mlp, mudd.biasMlp, false),
     ];
   },
   { staticArgnums: [5] },
@@ -411,7 +420,7 @@ function layerInputs(
   if (layerIndex === 24) {
     if (!history12) throw new Error("Missing MUDD tap 12");
     const [attentionMix, residualMix] = runMuddPair(
-      model.mudd,
+      tree.ref(model.mudd),
       history0.ref,
       history12.ref,
       hidden.ref,
@@ -446,7 +455,7 @@ export function prefill(
   state: LimiteState,
 ): np.Array {
   ensureCapacity(state, tokenIds.shape[0]);
-  let hidden = model.embedTokens.weight.slice(tokenIds.ref).astype(np.float32);
+  let hidden = model.embedTokens.weight.ref.slice(tokenIds.ref).astype(np.float32);
   hidden = rmsNorm(hidden);
   const valueEmbeds = model.valueEmbeds.weight
     .slice(tokenIds)
@@ -467,9 +476,9 @@ export function prefill(
     );
     state.caches[i].key.dispose();
     state.caches[i].value.dispose();
+    const previous = hidden;
     [hidden, state.caches[i]] = runLayerPrefill(
       model.layers[i],
-      hidden,
       attentionInput,
       residualBase,
       valueEmbeds.ref,
@@ -477,6 +486,7 @@ export function prefill(
       VALUE.has(i),
       state.capacity,
     );
+    previous.dispose();
     if (i === 11) history12 = hidden.ref;
     if (i === 22) history23 = hidden.ref;
   }
@@ -493,7 +503,7 @@ export function prefill(
 export function step(model: LimiteModel, token: number, state: LimiteState): np.Array {
   ensureCapacity(state, state.position + 1);
   const tokenIds = np.array([token], { dtype: np.uint32 });
-  let hidden = model.embedTokens.weight.slice(tokenIds.ref).astype(np.float32);
+  let hidden = model.embedTokens.weight.ref.slice(tokenIds.ref).astype(np.float32);
   hidden = rmsNorm(hidden);
   const valueEmbeds = model.valueEmbeds.weight
     .slice(tokenIds)
@@ -513,10 +523,10 @@ export function step(model: LimiteModel, token: number, state: LimiteState): np.
       history12,
       history23,
     );
+    const previous = hidden;
     [hidden, state.caches[i]] = runLayerStep(
       model.layers[i],
       state.caches[i],
-      hidden,
       attentionInput,
       residualBase,
       valueEmbeds.ref,
@@ -526,6 +536,7 @@ export function step(model: LimiteModel, token: number, state: LimiteState): np.
       GLOBAL.has(i),
       VALUE.has(i),
     );
+    previous.dispose();
     if (i === 11) history12 = hidden.ref;
     if (i === 22) history23 = hidden.ref;
   }
