@@ -166,6 +166,10 @@ async function sample(
 
 function renderMath(text: string): void {
   answer.replaceChildren();
+  const thoughtEnd = text.lastIndexOf("</think>");
+  if (thoughtEnd >= 0) text = text.slice(thoughtEnd + 8).trimStart();
+  else if (text.includes("<think>")) return;
+  text = text.replace(/\*\*(.*?)\*\*/gs, "$1").replace(/^#{1,6}\s+/gm, "");
   const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$)/g;
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
