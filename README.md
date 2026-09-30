@@ -1,12 +1,12 @@
 # Kalkulator
 
-Browser playground for Paradigma’s Limite 1B Violetto, running locally in your browser. Runs with JAX.js and WebGPU.
+Browser playground for [Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto), running locally in your browser with [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU.
 
 [Open Kalkulator](https://kalkulator.adamsioud.com)
 
 ## Browser requirements
 
-- A current desktop browser with WebGPU support
+- A current browser with WebGPU support
 - Enough memory to load the 1.93 GiB model
 
 ## Local setup
