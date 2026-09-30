@@ -1,6 +1,6 @@
 # Kalkulator
 
-Browser-only playground for Paradigma’s Limite 1B Violetto, running locally in your browser. Runs with JAX.js and WebGPU.
+Browser playground for Paradigma’s Limite 1B Violetto, running locally in your browser. Runs with JAX.js and WebGPU.
 
 [Open Kalkulator](https://kalkulator.adamsioud.com)
 
