@@ -81,8 +81,11 @@ let solving = false;
 let answerRevealed = false;
 let modelReady = false;
 let introTimeline: gsap.core.Timeline | null = null;
+let preparationStage = "";
+let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+console.info("[Kalkulator] preparing JAX.js and WebGPU");
 startPreparationIntro();
 worker.postMessage({ type: "prepare" });
 
@@ -113,11 +116,12 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     setStatus("ready");
     hint.textContent = "Ready";
     revealPrompt();
-    console.info("Kalkulator ready", JSON.stringify(message.timings));
+    console.info("[Kalkulator] ready", message.timings);
     return;
   }
 
   if (message.type === "status") {
+    logPreparation(message.status, message.progress);
     if (!modelReady) return;
     setStatus(message.status);
     if (message.progress !== undefined) {
@@ -163,16 +167,17 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     hint.textContent = message.timings.prefillMs
       ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
       : "Ready for another problem.";
-    console.info("Kalkulator timings", JSON.stringify(message.timings));
+    console.info("[Kalkulator] generation complete", message.timings);
     finishRun();
     return;
   }
 
   if (message.type === "diagnostic") {
-    console.warn(message.message);
+    console.warn("[Kalkulator]", message.message);
     return;
   }
 
+  console.error("[Kalkulator] preparation or inference failed", message.message);
   stopPreparationIntro();
 
   const artState =
@@ -195,7 +200,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
 });
 
 worker.addEventListener("error", (event) => {
-  console.error(event.error ?? event.message);
+  console.error("[Kalkulator] inference worker failed", event.error ?? event.message);
   stopPreparationIntro();
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
@@ -210,6 +215,23 @@ function finishRun(): void {
   run.disabled = !modelReady;
   run.textContent = "ask";
   delete run.dataset.mode;
+}
+
+function logPreparation(value: string, progress?: number): void {
+  const stage = value.split(" · ", 1)[0];
+  if (progress !== undefined) {
+    const bucket = Math.min(20, Math.floor(progress * 20));
+    if (stage === preparationStage && bucket === preparationProgressBucket) return;
+    preparationStage = stage;
+    preparationProgressBucket = bucket;
+    console.info(`[Kalkulator] ${value} · ${Math.round(progress * 100)}%`);
+    return;
+  }
+
+  if (stage === preparationStage && preparationProgressBucket === -1) return;
+  preparationStage = stage;
+  preparationProgressBucket = -1;
+  console.info(`[Kalkulator] ${value}`);
 }
 
 function startPreparationIntro(): void {
