@@ -720,6 +720,13 @@ function createFollowScroller(element: HTMLElement): FollowScroller {
     });
   };
 
+  const resume = () => {
+    release();
+    scroller.following = true;
+    scroller.lastHeight = -1;
+    followLatest(scroller);
+  };
+
   element.addEventListener(
     "wheel",
     (event) => {
@@ -730,6 +737,13 @@ function createFollowScroller(element: HTMLElement): FollowScroller {
   );
   element.addEventListener("touchstart", release, { passive: true });
   element.addEventListener("pointerdown", release, { passive: true });
+  element.addEventListener(
+    "pointerleave",
+    (event) => {
+      if (event.pointerType === "mouse") resume();
+    },
+    { passive: true },
+  );
   element.addEventListener(
     "pointerup",
     () => {
