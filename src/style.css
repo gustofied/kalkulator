@@ -185,37 +185,15 @@ input:focus-visible { outline: 0; }
   overflow-anchor: none;
   overscroll-behavior: contain;
   padding-right: 8px;
-  scrollbar-color: transparent transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .copy-flow:has(.work-copy:empty) { display: none; }
 
-.copy-flow::-webkit-scrollbar { width: 2px; }
-.copy-flow::-webkit-scrollbar-track { background: transparent; }
-.copy-flow::-webkit-scrollbar-thumb { background: transparent; }
+.copy-flow::-webkit-scrollbar { display: none; }
 
 .copy-flow:focus-visible {
   outline: 0;
-}
-
-.answer-section.has-answer .copy-flow:focus-visible {
-  box-shadow: -2px 0 0 rgb(75 54 95 / 32%);
-  scrollbar-color: rgb(24 24 24 / 12%) transparent;
-}
-
-.answer-section.has-answer .copy-flow:focus-visible::-webkit-scrollbar-thumb {
-  background: rgb(24 24 24 / 12%);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .answer-section.has-answer .copy-flow:hover {
-    scrollbar-color: rgb(24 24 24 / 12%) transparent;
-  }
-
-  .answer-section.has-answer .copy-flow:hover::-webkit-scrollbar-thumb {
-    background: rgb(24 24 24 / 12%);
-  }
 }
 
 .answer-art {
