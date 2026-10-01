@@ -9,7 +9,8 @@
   --ink: #181818;
   --ghost: rgb(24 24 24 / 36%);
   --violet: #4b365f;
-  --motion: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
 * { box-sizing: border-box; }
@@ -51,7 +52,7 @@ button, input { font: inherit; }
   color: var(--paper);
   background: var(--ink);
   transform: translateY(-80px);
-  transition: transform 700ms var(--motion);
+  transition: transform 220ms var(--ease-out);
 }
 
 .skip-link:focus { transform: translateY(0); }
@@ -71,7 +72,7 @@ main {
 #prompt-form {
   width: min(40rem, 100%);
   margin: 0 auto;
-  will-change: opacity, transform, filter;
+  will-change: opacity, transform;
 }
 
 #prompt-form.preparing {
@@ -100,7 +101,7 @@ main {
   content: "";
   transform: scaleX(var(--line-scale));
   transform-origin: left center;
-  transition: background-color 700ms var(--motion);
+  transition: background-color 240ms var(--ease-out);
 }
 
 .prompt-line:focus-within::after { background: var(--ink); }
@@ -120,11 +121,16 @@ input {
 }
 
 input::placeholder {
-  color: rgb(24 24 24 / 28%);
+  color: rgb(24 24 24 / 26%);
   opacity: 1;
+  transition: color 200ms var(--ease-out);
 }
 
+input:focus::placeholder { color: rgb(24 24 24 / 38%); }
+
 button {
+  display: inline-grid;
+  place-items: center;
   padding: 8px 0;
   border: 0;
   color: var(--ink);
@@ -134,13 +140,21 @@ button {
   letter-spacing: 0.04em;
   cursor: pointer;
   opacity: 0.34;
-  transition: opacity 700ms var(--motion);
+  touch-action: manipulation;
+  transform-origin: center;
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 140ms var(--ease-out);
 }
 
-button:hover, .prompt-line:focus-within button { opacity: 0.72; }
-button:active { opacity: 0.28; }
-button[data-mode="stop"] { color: var(--violet); }
-button:disabled { cursor: wait; opacity: 0.36; }
+.prompt-line:focus-within button { opacity: 0.68; }
+button:active { opacity: 0.52; transform: scale(0.97); }
+button[data-mode="stop"] { color: var(--violet); opacity: 0.72; }
+button:disabled { cursor: wait; opacity: 0.36; transform: none; }
+
+@media (hover: hover) and (pointer: fine) {
+  button:hover { opacity: 0.8; }
+}
 
 button:focus-visible, a:focus-visible {
   outline: 1px solid var(--violet);
@@ -247,14 +261,14 @@ input:focus-visible { outline: 0; }
 .answer-section.waiting .answer::after { display: none; }
 
 .answer-section.writing .answer-copy::after {
-  width: 2px;
-  height: 20px;
+  width: 1px;
+  height: 18px;
   display: inline-block;
   margin-left: 4px;
   background: var(--ink);
   content: "";
   vertical-align: -3px;
-  animation: caret 950ms steps(1, end) infinite;
+  animation: caret 880ms steps(1, end) infinite;
 }
 
 .katex-display {

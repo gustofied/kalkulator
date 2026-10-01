@@ -94,7 +94,7 @@ form.addEventListener("submit", (event) => {
   if (!modelReady) return;
   if (solving) {
     run.disabled = true;
-    run.textContent = "Stopping";
+    run.textContent = "stopping";
     setStatus("stopping");
     worker.postMessage({ type: "stop" });
     return;
@@ -103,7 +103,7 @@ form.addEventListener("submit", (event) => {
   const problem = prompt.value.trim();
   if (!problem) return;
   solving = true;
-  run.textContent = "Stop";
+  run.textContent = "stop";
   run.dataset.mode = "stop";
   resetOutput();
   worker.postMessage({ type: "solve", problem });
@@ -127,7 +127,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     if (message.progress !== undefined) {
       hint.textContent = `${Math.round(message.progress * 100)}%`;
     } else if (message.status === "reading cached model") {
-      hint.textContent = "Reading the local model…";
+      hint.textContent = "Reading local model";
     } else if (message.status === "uploading weights") {
       hint.textContent = "Model cached locally";
     } else if (message.status.startsWith("prefill")) {
@@ -189,8 +189,8 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   if (artState) {
     Flip.from(artState, {
       absolute: true,
-      duration: 0.9,
-      ease: "power3.inOut",
+      duration: 0.68,
+      ease: "power4.inOut",
     });
   }
   showAnswerMessage(message.message);
@@ -241,9 +241,9 @@ function startPreparationIntro(): void {
   if (reduceMotion) return;
   gsap.from(answerArt, {
     opacity: 0,
-    scale: 0.98,
-    duration: 1.1,
-    ease: "power2.out",
+    scale: 0.99,
+    duration: 0.8,
+    ease: "power3.out",
   });
   introTimeline = gsap.timeline({ repeat: -1, repeatDelay: 0.55 });
   bloomShapes.forEach((bloom, index) => {
@@ -278,18 +278,18 @@ function stopPreparationIntro(): void {
   gsap.killTweensOf([answerArt, answerArtGhost, answerArtInk, ...answerArtBlooms]);
   gsap.to(answerArtInk, {
     opacity: 1,
-    duration: reduceMotion ? 0.2 : 0.7,
-    ease: "power2.out",
+    duration: reduceMotion ? 0.2 : 0.55,
+    ease: "power3.out",
   });
   gsap.to(answerArtBlooms, {
     opacity: 0,
-    duration: reduceMotion ? 0.2 : 0.45,
-    ease: "power2.out",
+    duration: reduceMotion ? 0.2 : 0.24,
+    ease: "power3.out",
   });
   gsap.to(answerArtGhost, {
     opacity: 0,
-    duration: reduceMotion ? 0.2 : 0.5,
-    ease: "power2.out",
+    duration: reduceMotion ? 0.2 : 0.36,
+    ease: "power3.out",
   });
 }
 
@@ -307,7 +307,7 @@ function revealPrompt(): void {
   gsap.set(promptLine, { "--line-scale": reduceMotion ? 1 : 0 });
   gsap.set([prompt, run], {
     opacity: 0,
-    y: reduceMotion ? 0 : 5,
+    y: reduceMotion ? 0 : 3,
   });
 
   gsap
@@ -319,28 +319,28 @@ function revealPrompt(): void {
     })
     .to(promptLine, {
       "--line-scale": 1,
-      duration: reduceMotion ? 0.2 : 0.9,
-      ease: "power3.inOut",
+      duration: reduceMotion ? 0.2 : 0.62,
+      ease: "power4.inOut",
     })
     .to(
       prompt,
       {
         opacity: 1,
         y: 0,
-        duration: reduceMotion ? 0.2 : 0.65,
-        ease: "power3.out",
+        duration: reduceMotion ? 0.2 : 0.42,
+        ease: "power4.out",
       },
-      reduceMotion ? 0 : 0.18,
+      reduceMotion ? 0 : 0.12,
     )
     .to(
       run,
       {
         opacity: 0.34,
         y: 0,
-        duration: reduceMotion ? 0.2 : 0.55,
-        ease: "power3.out",
+        duration: reduceMotion ? 0.2 : 0.32,
+        ease: "power4.out",
       },
-      reduceMotion ? 0 : 0.32,
+      reduceMotion ? 0 : 0.2,
     );
 }
 
@@ -372,8 +372,8 @@ function renderOutput(rawText: string): boolean {
   if (artState) {
     Flip.from(artState, {
       absolute: true,
-      duration: 0.9,
-      ease: "power3.inOut",
+      duration: 0.68,
+      ease: "power4.inOut",
     });
   }
   const rendered = renderAnswerMath(output.answer);
@@ -456,7 +456,7 @@ function animateAnswerIn(): void {
   gsap.fromTo(
     answerCopy,
     { opacity: 0 },
-    { opacity: 1, duration: 0.8, ease: "power2.out" },
+    { opacity: 1, duration: 0.36, ease: "power3.out" },
   );
 }
 

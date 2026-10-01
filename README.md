@@ -1,6 +1,6 @@
 # Kalkulator
 
-Browser playground for [Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto), running locally in your browser with [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU.
+[Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto) for mathematics, running in your browser with [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU.
 
 [Open Kalkulator](https://gustofied.github.io/kalkulator/)
 
