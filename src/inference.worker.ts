@@ -7,7 +7,7 @@ import {
 } from "@jax-js/jax";
 import { cachedFetch, opfs } from "@jax-js/loaders";
 
-import { WebGpuSampler } from "./gpu-sampler";
+import type { WebGpuSampler } from "./gpu-sampler";
 import {
   createState,
   loadModel,
@@ -34,7 +34,7 @@ type InboundMessage =
   | {
       type: "solve";
       problem: string;
-      options?: { lmHead?: "auto" | "jax" | "wgsl"; seed?: number };
+      options?: { lmHead?: "jax" | "wgsl"; seed?: number };
     };
 
 type RunTimings = {
@@ -46,14 +46,6 @@ type RunTimings = {
   prefillMs?: number;
   firstTokenMs?: number;
   totalMs?: number;
-  sampler?: "wgsl" | "cpu";
-  samplerGpuMs?: number;
-  samplerCpuMs?: number;
-  lmHead?: "wgsl" | "jax";
-  lmHeadGpuMs?: number;
-  lmHeadJaxMs?: number;
-  lmHeadChecks?: number;
-  lmHeadVariant?: "rows4" | "unavailable";
 };
 
 let model: LimiteModel | null = null;
@@ -61,9 +53,7 @@ let tokenizer: ViolettoTokenizer | null = null;
 let initialized = false;
 let busy = false;
 let gpuSampler: WebGpuSampler | null = null;
-let samplerMode: "probe" | "wgsl" | "cpu" = "probe";
-let lmHeadMode: "probe" | "wgsl" | "jax" = "probe";
-let lmHeadValidationRemaining = 4;
+let gpuSamplerPromise: Promise<WebGpuSampler | null> | null = null;
 
 self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
   if (busy) return;
@@ -95,7 +85,7 @@ async function prepare(): Promise<void> {
 
 async function solve(
   problem: string,
-  options?: { lmHead?: "auto" | "jax" | "wgsl"; seed?: number },
+  options?: { lmHead?: "jax" | "wgsl"; seed?: number },
 ): Promise<void> {
   const timings: RunTimings = {};
   const runStarted = performance.now();
@@ -138,9 +128,8 @@ async function solve(
           TEMPERATURE,
           TOP_K,
           TOP_P,
-          timings,
           random(),
-          options?.lmHead ?? "auto",
+          options?.lmHead ?? "jax",
         );
         if (next === activeTokenizer.eosToken || next === activeTokenizer.imEndToken) {
           reason = "complete";
@@ -216,20 +205,6 @@ async function setup(timings: RunTimings): Promise<void> {
     defaultDevice("webgpu");
     initialized = true;
     timings.deviceMs = performance.now() - started;
-
-    try {
-      postStatus("compiling GPU sampler");
-      gpuSampler = await WebGpuSampler.create();
-      await gpuSampler.selfTest();
-    } catch (error) {
-      console.warn("Specialized WebGPU sampler unavailable; using CPU sampling.", error);
-      postMessage({
-        type: "diagnostic",
-        message: `GPU sampler setup: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      gpuSampler = null;
-      samplerMode = "cpu";
-    }
   }
 
   if (!tokenizer) {
@@ -320,212 +295,59 @@ function count(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
-async function sample(
-  logits: np.Array,
-  temperature: number,
-  topK: number,
-  topP: number,
-  timings: RunTimings,
-  randomValue: number = Math.random(),
-): Promise<number> {
-  if (!gpuSampler || samplerMode === "cpu" || topK !== TOP_K) {
-    timings.sampler = "cpu";
-    return sampleCpu(logits, temperature, topK, topP, randomValue);
-  }
-
-  if (samplerMode === "probe") {
-    try {
-      const gpuStarted = performance.now();
-      const gpuToken = await gpuSampler.sample(
-        logits.ref,
-        temperature,
-        topP,
-        randomValue,
-      );
-      const gpuMs = performance.now() - gpuStarted;
-
-      const cpuStarted = performance.now();
-      const values = (await logits.data()) as Float32Array;
-      const cpuToken = sampleValues(values, temperature, topK, topP, randomValue);
-      const cpuMs = performance.now() - cpuStarted;
-      timings.samplerGpuMs = gpuMs;
-      timings.samplerCpuMs = cpuMs;
-
-      if (gpuToken !== cpuToken) {
-        samplerMode = "cpu";
-        timings.sampler = "cpu";
-        console.warn(
-          `GPU sampler returned ${gpuToken}; CPU reference returned ${cpuToken}. Falling back.`,
-        );
-        postMessage({
-          type: "diagnostic",
-          message: `GPU sampler mismatch: GPU ${gpuToken}, CPU ${cpuToken}`,
-        });
-        return cpuToken;
-      }
-
-      samplerMode = gpuMs <= cpuMs ? "wgsl" : "cpu";
-      timings.sampler = samplerMode;
-      console.info(
-        `Sampler probe: WGSL ${gpuMs.toFixed(2)} ms, CPU ${cpuMs.toFixed(2)} ms; using ${samplerMode}.`,
-      );
-      return gpuToken;
-    } catch (error) {
-      console.warn("GPU sampler probe failed; using CPU sampling.", error);
-      postMessage({
-        type: "diagnostic",
-        message: `GPU sampler probe: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      gpuSampler = null;
-      samplerMode = "cpu";
-      timings.sampler = "cpu";
-      return sampleCpu(logits, temperature, topK, topP, randomValue);
-    }
-  }
-
-  try {
-    const token = await gpuSampler.sample(logits.ref, temperature, topP, randomValue);
-    logits.dispose();
-    timings.sampler = "wgsl";
-    return token;
-  } catch (error) {
-    console.warn("GPU sampler failed; using CPU sampling.", error);
-    gpuSampler = null;
-    samplerMode = "cpu";
-    timings.sampler = "cpu";
-    return sampleCpu(logits, temperature, topK, topP, randomValue);
-  }
-}
-
 async function sampleHidden(
   activeModel: LimiteModel,
   hidden: np.Array,
   temperature: number,
   topK: number,
   topP: number,
-  timings: RunTimings,
   randomValue: number,
-  strategy: "auto" | "jax" | "wgsl",
+  strategy: "jax" | "wgsl",
 ): Promise<number> {
-  const weight = lmHeadWeight(activeModel);
-  timings.lmHeadVariant = gpuSampler?.lmHeadVariant ?? "unavailable";
-  if (
-    strategy === "jax" ||
-    !gpuSampler ||
-    !gpuSampler.supportsLmHead ||
-    lmHeadMode === "jax"
-  ) {
-    if (strategy === "auto") lmHeadMode = "jax";
-    timings.lmHead = "jax";
-    return sample(
-      logitsFromHidden(activeModel, hidden),
-      temperature,
-      topK,
-      topP,
-      timings,
-      randomValue,
-    );
-  }
-
   if (strategy === "wgsl") {
-    timings.lmHead = "wgsl";
-    return sampleCustomHead(
-      gpuSampler,
-      hidden,
-      weight,
-      temperature,
-      topP,
-      randomValue,
-    );
-  }
-
-  if (lmHeadMode === "probe") {
-    const referenceHidden = hidden.ref;
-    let gpuToken: number;
-    let gpuMs: number;
-    try {
-      // Isolate the head comparison from the lazy transformer step. Without
-      // this barrier, only the custom path is charged for the decode trunk.
-      await blockUntilReady(hidden);
-      const gpuStarted = performance.now();
-      gpuToken = await sampleCustomHead(
-        gpuSampler,
+    const sampler = await getGpuSampler();
+    if (sampler) {
+      return sampleCustomHead(
+        sampler,
         hidden,
-        weight,
+        lmHeadWeight(activeModel),
         temperature,
         topP,
         randomValue,
       );
-      gpuMs = performance.now() - gpuStarted;
-    } catch (error) {
-      lmHeadMode = "jax";
-      timings.lmHead = "jax";
-      postMessage({
-        type: "diagnostic",
-        message: `LM head probe: ${error instanceof Error ? error.message : String(error)}; using JAX`,
-      });
-      return sample(
-        logitsFromHidden(activeModel, referenceHidden),
-        temperature,
-        topK,
-        topP,
-        timings,
-        randomValue,
-      );
     }
-
-    const jaxStarted = performance.now();
-    const jaxToken = await sample(
-      logitsFromHidden(activeModel, referenceHidden),
-      temperature,
-      topK,
-      topP,
-      timings,
-      randomValue,
-    );
-    const jaxMs = performance.now() - jaxStarted;
-    const previousChecks = timings.lmHeadChecks ?? 0;
-    const checks = previousChecks + 1;
-    timings.lmHeadGpuMs =
-      ((timings.lmHeadGpuMs ?? 0) * previousChecks + gpuMs) / checks;
-    timings.lmHeadJaxMs =
-      ((timings.lmHeadJaxMs ?? 0) * previousChecks + jaxMs) / checks;
-    timings.lmHeadChecks = checks;
-
-    if (gpuToken !== jaxToken) {
-      lmHeadMode = "jax";
-      timings.lmHead = "jax";
-      postMessage({
-        type: "diagnostic",
-        message: `LM head mismatch: WGSL ${gpuToken}, JAX ${jaxToken}; using JAX`,
-      });
-      return jaxToken;
-    }
-
-    lmHeadValidationRemaining--;
-    if (lmHeadValidationRemaining === 0) {
-      const useWgsl = timings.lmHeadGpuMs <= timings.lmHeadJaxMs;
-      lmHeadMode = useWgsl ? "wgsl" : "jax";
-      timings.lmHead = lmHeadMode;
-      postMessage({
-        type: "diagnostic",
-        message: `LM head verified (${gpuSampler.lmHeadVariant}, ${checks} tokens): WGSL ${timings.lmHeadGpuMs.toFixed(2)} ms, JAX ${timings.lmHeadJaxMs.toFixed(2)} ms; using ${lmHeadMode.toUpperCase()}`,
-      });
-    } else {
-      timings.lmHead = "jax";
-    }
-    return jaxToken;
   }
 
-  timings.lmHead = "wgsl";
-  return sampleCustomHead(
-    gpuSampler,
-    hidden,
-    weight,
+  return sampleCpu(
+    logitsFromHidden(activeModel, hidden),
     temperature,
+    topK,
     topP,
     randomValue,
   );
+}
+
+async function getGpuSampler(): Promise<WebGpuSampler | null> {
+  if (gpuSampler) return gpuSampler;
+  if (gpuSamplerPromise) return gpuSamplerPromise;
+
+  gpuSamplerPromise = (async () => {
+    try {
+      const { WebGpuSampler: Sampler } = await import("./gpu-sampler");
+      const candidate = await Sampler.create();
+      await candidate.selfTest();
+      if (!candidate.supportsLmHead) {
+        console.warn("Experimental WGSL head is unsupported; using JAX.");
+        return null;
+      }
+      gpuSampler = candidate;
+      return candidate;
+    } catch (error) {
+      console.warn("Experimental WGSL head unavailable; using JAX.", error);
+      return null;
+    }
+  })();
+  return gpuSamplerPromise;
 }
 
 async function sampleCustomHead(

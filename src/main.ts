@@ -37,12 +37,8 @@ type WorkerMessage =
         prefillMs?: number;
         firstTokenMs?: number;
         totalMs?: number;
-        sampler?: "wgsl" | "cpu";
-        samplerGpuMs?: number;
-        samplerCpuMs?: number;
       };
     }
-  | { type: "diagnostic"; message: string }
   | { type: "error"; message: string };
 
 const form = document.querySelector<HTMLFormElement>("#prompt-form")!;
@@ -52,7 +48,6 @@ const prompt = document.querySelector<HTMLInputElement>("#prompt")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
-const benchmarkOutput = document.querySelector<HTMLOutputElement>("#benchmark-output")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
 const copyFlow = document.querySelector<HTMLElement>("#copy-flow")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
@@ -94,12 +89,12 @@ let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const answerScroller = createFollowScroller(copyFlow);
-const benchmarkParams = new URLSearchParams(location.search);
-const requestedHead = benchmarkParams.get("head");
-const benchmarkHead =
-  requestedHead === "wgsl" || requestedHead === "jax" ? requestedHead : "auto";
-const benchmarkSeedValue = benchmarkParams.get("seed");
-const benchmarkSeed = benchmarkSeedValue === null ? undefined : Number(benchmarkSeedValue);
+const runtimeParams = new URLSearchParams(location.search);
+const requestedHead = runtimeParams.get("head");
+const headStrategy =
+  requestedHead === "wgsl" ? "wgsl" : "jax";
+const seedValue = runtimeParams.get("seed");
+const seed = seedValue === null ? undefined : Number(seedValue);
 
 console.info("[Kalkulator] preparing JAX.js and WebGPU");
 startPreparationIntro();
@@ -122,8 +117,8 @@ form.addEventListener("submit", (event) => {
     type: "solve",
     problem,
     options: {
-      lmHead: benchmarkHead,
-      ...(Number.isFinite(benchmarkSeed) ? { seed: benchmarkSeed } : {}),
+      lmHead: headStrategy,
+      ...(Number.isFinite(seed) ? { seed } : {}),
     },
   });
 });
@@ -167,30 +162,27 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
       revealAnswerLayout();
       showAnswerMessage(
         message.reason === "limit"
-          ? "No final answer before the output limit."
+          ? "Violetto did not reach a final answer. Try a shorter mathematics problem."
           : "No final answer.",
       );
     }
     answerSection.classList.remove("reasoning", "writing");
-    const finalStatus = message.reason === "limit" ? "output limit reached" : "answer complete";
+    const finalStatus = message.reason === "limit" ? "no answer" : "answer complete";
     setStatus(finalStatus);
-    hint.textContent = message.timings.prefillMs
-      ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
-      : "Ready for another problem.";
+    hint.textContent =
+      message.reason === "limit"
+        ? "Try a shorter mathematics problem."
+        : message.timings.prefillMs
+          ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
+          : "Ready for another problem.";
     const summary = {
       tokens: message.tokens,
       tokensPerSecond: Number(message.speed.toFixed(2)),
       reason: message.reason,
       ...message.timings,
     };
-    benchmarkOutput.textContent = `Benchmark ${JSON.stringify(summary)}`;
     console.info(`[Kalkulator] generation complete ${JSON.stringify(summary)}`);
     finishRun();
-    return;
-  }
-
-  if (message.type === "diagnostic") {
-    console.warn("[Kalkulator]", message.message);
     return;
   }
 
