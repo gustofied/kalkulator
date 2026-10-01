@@ -11,6 +11,8 @@ import { WebGpuSampler } from "./gpu-sampler";
 import {
   createState,
   loadModel,
+  lmHeadWeight,
+  logitsFromHidden,
   MODEL_BYTES,
   MODEL_URL,
   prefill,
@@ -29,7 +31,11 @@ const RENDER_INTERVAL_MS = 250;
 
 type InboundMessage =
   | { type: "prepare" }
-  | { type: "solve"; problem: string };
+  | {
+      type: "solve";
+      problem: string;
+      options?: { lmHead?: "auto" | "jax" | "wgsl"; seed?: number };
+    };
 
 type RunTimings = {
   deviceMs?: number;
@@ -43,6 +49,11 @@ type RunTimings = {
   sampler?: "wgsl" | "cpu";
   samplerGpuMs?: number;
   samplerCpuMs?: number;
+  lmHead?: "wgsl" | "jax";
+  lmHeadGpuMs?: number;
+  lmHeadJaxMs?: number;
+  lmHeadChecks?: number;
+  lmHeadVariant?: "scalar" | "unavailable";
 };
 
 let model: LimiteModel | null = null;
@@ -51,6 +62,8 @@ let initialized = false;
 let busy = false;
 let gpuSampler: WebGpuSampler | null = null;
 let samplerMode: "probe" | "wgsl" | "cpu" = "probe";
+let lmHeadMode: "probe" | "wgsl" | "jax" = "probe";
+let lmHeadValidationRemaining = 4;
 
 self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
   if (busy) return;
@@ -61,7 +74,7 @@ self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
     });
     return;
   }
-  void solve(event.data.problem).finally(() => {
+  void solve(event.data.problem, event.data.options).finally(() => {
     busy = false;
   });
 });
@@ -80,7 +93,10 @@ async function prepare(): Promise<void> {
   }
 }
 
-async function solve(problem: string): Promise<void> {
+async function solve(
+  problem: string,
+  options?: { lmHead?: "auto" | "jax" | "wgsl"; seed?: number },
+): Promise<void> {
   const timings: RunTimings = {};
   const runStarted = performance.now();
 
@@ -95,27 +111,37 @@ async function solve(problem: string): Promise<void> {
     const speeds: number[] = [];
     let decoded = "";
     let lastSpeed = 0;
-    let logits: np.Array | null = null;
+    let hidden: np.Array | null = null;
     let lastRender = 0;
     let reason: "complete" | "limit" = "limit";
+    const random = makeRandom(options?.seed);
 
     try {
       postStatus(`prefill · ${tokens.length} tok`);
       const prefillStarted = performance.now();
-      logits = prefill(
+      hidden = prefill(
         tree.ref(activeModel),
         np.array(tokens, { dtype: np.uint32 }),
         state,
       );
-      await blockUntilReady(logits);
+      await blockUntilReady(hidden);
       timings.prefillMs = performance.now() - prefillStarted;
       const decodeStarted = performance.now();
 
       for (let index = 0; index < HARD_TOKEN_LIMIT; index++) {
-        const current = logits;
-        if (!current) throw new Error("Missing decode logits.");
-        logits = null;
-        const next = await sample(current, TEMPERATURE, TOP_K, TOP_P, timings);
+        const current = hidden;
+        if (!current) throw new Error("Missing decode hidden state.");
+        hidden = null;
+        const next = await sampleHidden(
+          activeModel,
+          current,
+          TEMPERATURE,
+          TOP_K,
+          TOP_P,
+          timings,
+          random(),
+          options?.lmHead ?? "auto",
+        );
         if (next === activeTokenizer.eosToken || next === activeTokenizer.imEndToken) {
           reason = "complete";
           break;
@@ -151,7 +177,7 @@ async function solve(problem: string): Promise<void> {
         }
 
         if (index + 1 < HARD_TOKEN_LIMIT) {
-          logits = step(tree.ref(activeModel), next, state);
+          hidden = step(tree.ref(activeModel), next, state);
         }
       }
 
@@ -167,7 +193,7 @@ async function solve(problem: string): Promise<void> {
         timings,
       });
     } finally {
-      logits?.dispose();
+      hidden?.dispose();
       tree.dispose(state);
     }
   } catch (error) {
@@ -300,13 +326,13 @@ async function sample(
   topK: number,
   topP: number,
   timings: RunTimings,
+  randomValue: number = Math.random(),
 ): Promise<number> {
   if (!gpuSampler || samplerMode === "cpu" || topK !== TOP_K) {
     timings.sampler = "cpu";
-    return sampleCpu(logits, temperature, topK, topP);
+    return sampleCpu(logits, temperature, topK, topP, randomValue);
   }
 
-  const randomValue = Math.random();
   if (samplerMode === "probe") {
     try {
       const gpuStarted = performance.now();
@@ -369,6 +395,172 @@ async function sample(
     timings.sampler = "cpu";
     return sampleCpu(logits, temperature, topK, topP, randomValue);
   }
+}
+
+async function sampleHidden(
+  activeModel: LimiteModel,
+  hidden: np.Array,
+  temperature: number,
+  topK: number,
+  topP: number,
+  timings: RunTimings,
+  randomValue: number,
+  strategy: "auto" | "jax" | "wgsl",
+): Promise<number> {
+  const weight = lmHeadWeight(activeModel);
+  timings.lmHeadVariant = gpuSampler?.lmHeadVariant ?? "unavailable";
+  if (
+    strategy === "jax" ||
+    !gpuSampler ||
+    !gpuSampler.supportsLmHead ||
+    lmHeadMode === "jax"
+  ) {
+    if (strategy === "auto") lmHeadMode = "jax";
+    timings.lmHead = "jax";
+    return sample(
+      logitsFromHidden(activeModel, hidden),
+      temperature,
+      topK,
+      topP,
+      timings,
+      randomValue,
+    );
+  }
+
+  if (strategy === "wgsl") {
+    timings.lmHead = "wgsl";
+    return sampleCustomHead(
+      gpuSampler,
+      hidden,
+      weight,
+      temperature,
+      topP,
+      randomValue,
+    );
+  }
+
+  if (lmHeadMode === "probe") {
+    const referenceHidden = hidden.ref;
+    let gpuToken: number;
+    let gpuMs: number;
+    try {
+      // Isolate the head comparison from the lazy transformer step. Without
+      // this barrier, only the custom path is charged for the decode trunk.
+      await blockUntilReady(hidden);
+      const gpuStarted = performance.now();
+      gpuToken = await sampleCustomHead(
+        gpuSampler,
+        hidden,
+        weight,
+        temperature,
+        topP,
+        randomValue,
+      );
+      gpuMs = performance.now() - gpuStarted;
+    } catch (error) {
+      lmHeadMode = "jax";
+      timings.lmHead = "jax";
+      postMessage({
+        type: "diagnostic",
+        message: `LM head probe: ${error instanceof Error ? error.message : String(error)}; using JAX`,
+      });
+      return sample(
+        logitsFromHidden(activeModel, referenceHidden),
+        temperature,
+        topK,
+        topP,
+        timings,
+        randomValue,
+      );
+    }
+
+    const jaxStarted = performance.now();
+    const jaxToken = await sample(
+      logitsFromHidden(activeModel, referenceHidden),
+      temperature,
+      topK,
+      topP,
+      timings,
+      randomValue,
+    );
+    const jaxMs = performance.now() - jaxStarted;
+    const previousChecks = timings.lmHeadChecks ?? 0;
+    const checks = previousChecks + 1;
+    timings.lmHeadGpuMs =
+      ((timings.lmHeadGpuMs ?? 0) * previousChecks + gpuMs) / checks;
+    timings.lmHeadJaxMs =
+      ((timings.lmHeadJaxMs ?? 0) * previousChecks + jaxMs) / checks;
+    timings.lmHeadChecks = checks;
+
+    if (gpuToken !== jaxToken) {
+      lmHeadMode = "jax";
+      timings.lmHead = "jax";
+      postMessage({
+        type: "diagnostic",
+        message: `LM head mismatch: WGSL ${gpuToken}, JAX ${jaxToken}; using JAX`,
+      });
+      return jaxToken;
+    }
+
+    lmHeadValidationRemaining--;
+    if (lmHeadValidationRemaining === 0) {
+      const useWgsl = timings.lmHeadGpuMs <= timings.lmHeadJaxMs;
+      lmHeadMode = useWgsl ? "wgsl" : "jax";
+      timings.lmHead = lmHeadMode;
+      postMessage({
+        type: "diagnostic",
+        message: `LM head verified (${gpuSampler.lmHeadVariant}, ${checks} tokens): WGSL ${timings.lmHeadGpuMs.toFixed(2)} ms, JAX ${timings.lmHeadJaxMs.toFixed(2)} ms; using ${lmHeadMode.toUpperCase()}`,
+      });
+    } else {
+      timings.lmHead = "jax";
+    }
+    return jaxToken;
+  }
+
+  timings.lmHead = "wgsl";
+  return sampleCustomHead(
+    gpuSampler,
+    hidden,
+    weight,
+    temperature,
+    topP,
+    randomValue,
+  );
+}
+
+async function sampleCustomHead(
+  sampler: WebGpuSampler,
+  hidden: np.Array,
+  weight: np.Array,
+  temperature: number,
+  topP: number,
+  randomValue: number,
+): Promise<number> {
+  const keepAlive = hidden.ref;
+  try {
+    await blockUntilReady(hidden);
+    return await sampler.sampleLmHead(
+      hidden,
+      weight.ref,
+      temperature,
+      topP,
+      randomValue,
+    );
+  } finally {
+    keepAlive.dispose();
+  }
+}
+
+function makeRandom(seed?: number): () => number {
+  if (seed === undefined || !Number.isFinite(seed)) return Math.random;
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
 }
 
 async function sampleCpu(

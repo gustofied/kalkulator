@@ -16,6 +16,7 @@ Make Violetto Limite 1B usable as a private, browser-only mathematics playground
 - Execution: WebGPU inference in a dedicated Web Worker
 - Startup: the worker prepares the device, tokenizer, sampler, and model before revealing the prompt
 - Sampling: specialized WGSL hierarchical top-k plus temperature/top-p selection, with CPU verification and fallback
+- Vocabulary head: shape-specific WGSL projection that keeps only each workgroup's top 50 logits; four live tokens are checked against JAX.js before it is selected
 - Decode layout: fused QKV/gate-up/gate projections, shared RoPE factors, and packed KV tensors
 - Streaming: incremental UTF-8 token decoding and 250 ms UI render batches
 
@@ -36,6 +37,8 @@ JAX.js was chosen because it made an exact custom architecture possible quickly.
 - After projection fusion, shared RoPE, packed KV updates, and sampler-side softcap, a warm Chrome run on the same M2 Air produced the correct boxed answer in 403 generated tokens at 10.6 tokens/second with 1.4 seconds of prefill. The earlier comparable UI run was 7.8 tokens/second, so this spot check is about 36% faster.
 - A patched wllama/llama.cpp WebGPU prototype with the published Q4_K_M GGUF reached 12.5–13.8 tokens/second on the same machine. The Q2_K_L build reached 11.5 tokens/second and multithreaded Wasm reached roughly 2 tokens/second. Q4 needed 321–384 tokens for the toy equation and one run hit its output cap before the boxed answer, so the raw-rate improvement did not justify replacing the reference runtime. These are local spot checks, not a controlled benchmark.
 - A timestamp-query profile showed the fused gate/up matvec and vocabulary head as the largest GPU kernels. It also showed that decode still launches hundreds of small kernels per token, leaving submission overhead as the main target after quantization.
+- The custom tied-vocabulary kernel matches JAX.js's scalar FP32 accumulation order over FP16 weights and holds the exported JAX.js buffer alive until its external WebGPU command completes. A seeded 270-token Chrome run matched the reference token for token. In an immediate same-tab M2 Air comparison, it produced 10.98 tokens/second versus 10.56 for the JAX.js head. The isolated head averaged 8.23 ms versus 13.87 ms. These are local spot checks, not portable benchmark claims.
+- Loading the app in more than one model tab duplicates roughly 2 GiB of weights and materially reduces throughput on a 16 GB machine.
 - A completed OPFS checkpoint survives reload without another network download. Warm loads report the local read separately from GPU upload.
 - On every page load, cached weights still need to be read, parsed, uploaded to the GPU, and compiled.
 - Violetto's exact canonical system prompt from `chat_template.jinja` is required; custom system wording caused runaway hidden reasoning in testing.
@@ -49,19 +52,19 @@ JAX.js was chosen because it made an exact custom architecture possible quickly.
 4. Sampling still requires a four-byte GPU readback and queue synchronization for every token.
 5. The throttled answer, KaTeX, and D3 trace still rebuild their rendered output during generation.
 6. A small prompt can still spend hundreds of tokens in hidden reasoning before producing its answer.
-7. Load and inference timings are visible locally but are not yet collected into a repeatable benchmark harness.
+7. The query parameters `?seed=1`, `?head=jax`, and `?head=wgsl` provide deterministic A/B controls, but there is not yet a multi-prompt benchmark suite.
 
 ## Optimization sequence
 
-1. Build a repeatable cold/warm benchmark harness from the current local timings.
+1. Turn the deterministic A/B controls into a repeatable cold/warm, short/long, multi-prompt benchmark suite.
 2. Replace capacity-wide KV-cache rewrites with indexed updates when JAX.js exposes an efficient update primitive.
-3. Reduce GPU submissions by fusing more of the decode pass; queue-level batching alone is unsafe because JAX.js releases intermediate buffers after each submission.
-4. Evaluate INT8/INT4 weights and a specialized quantized matmul kernel.
+3. Quantize the dominant vocabulary and gate/up projections to INT4 and write shape-specific fused matvec kernels.
+4. Reduce GPU submissions by fusing the decode pass; queue-level batching alone is unsafe because JAX.js releases intermediate buffers after each submission.
 5. Build one ONNX Runtime/Transformers.js comparison before deciding whether to leave JAX.js.
 
 ## Runtime decision
 
-Keep JAX.js until measurements justify a migration. Generic Q4 execution in a patched wllama/llama.cpp build was only modestly faster and less reliable for time-to-answer; a worthwhile quantized path needs a specialized fused decode graph, not just smaller weights. Transformers.js/ONNX Runtime remains a comparison candidate because it offers WebGPU and quantized model formats. WebLLM/MLC is optimized for browser LLMs but supporting Violetto's custom architecture would be a larger port.
+Keep JAX.js until measurements justify a migration. Generic Q4 execution in a patched wllama/llama.cpp build was only modestly faster and less reliable for time-to-answer; a worthwhile quantized path needs a specialized fused decode graph, not just smaller weights. The scalar vocabulary-head kernel proves the correctness-gated custom-kernel loop, but its roughly four-percent end-to-end gain is nowhere near 100 tokens/second. Reaching that target would require quantized weight traffic and broad decode fusion, not sampler tuning alone. Transformers.js/ONNX Runtime remains a comparison candidate because it offers WebGPU and quantized model formats. WebLLM/MLC is optimized for browser LLMs but supporting Violetto's custom architecture would be a larger port.
 
 ## Definition of progress
 

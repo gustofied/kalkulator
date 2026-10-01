@@ -84,29 +84,11 @@ main {
 #prompt-form.solving { opacity: 0.62; }
 
 .prompt-line {
-  --line-scale: 1;
-
-  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 24px;
 }
-
-.prompt-line::after {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 1px;
-  background: rgb(24 24 24 / 16%);
-  content: "";
-  transform: scaleX(var(--line-scale));
-  transform-origin: left center;
-  transition: background-color 240ms var(--ease-out);
-}
-
-.prompt-line:focus-within::after { background: var(--ink); }
 
 input {
   width: 100%;

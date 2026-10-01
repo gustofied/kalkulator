@@ -53,6 +53,7 @@ const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
 const result = document.querySelector<HTMLElement>("#result")!;
+const benchmarkOutput = document.querySelector<HTMLOutputElement>("#benchmark-output")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
 const answerArtGhost = document.querySelector<HTMLImageElement>(".answer-art-ghost")!;
@@ -90,6 +91,12 @@ let workTimer: number | null = null;
 let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const benchmarkParams = new URLSearchParams(location.search);
+const requestedHead = benchmarkParams.get("head");
+const benchmarkHead =
+  requestedHead === "wgsl" || requestedHead === "jax" ? requestedHead : "auto";
+const benchmarkSeedValue = benchmarkParams.get("seed");
+const benchmarkSeed = benchmarkSeedValue === null ? undefined : Number(benchmarkSeedValue);
 
 console.info("[Kalkulator] preparing JAX.js and WebGPU");
 startPreparationIntro();
@@ -107,7 +114,14 @@ form.addEventListener("submit", (event) => {
   run.disabled = true;
   resetOutput();
   startWorkingMotion();
-  worker.postMessage({ type: "solve", problem });
+  worker.postMessage({
+    type: "solve",
+    problem,
+    options: {
+      lmHead: benchmarkHead,
+      ...(Number.isFinite(benchmarkSeed) ? { seed: benchmarkSeed } : {}),
+    },
+  });
 });
 
 worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
@@ -117,7 +131,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     setStatus("ready");
     hint.textContent = "Ready";
     revealPrompt();
-    console.info("[Kalkulator] ready", message.timings);
+    console.info(`[Kalkulator] ready ${JSON.stringify(message.timings)}`);
     return;
   }
 
@@ -159,7 +173,14 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     hint.textContent = message.timings.prefillMs
       ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
       : "Ready for another problem.";
-    console.info("[Kalkulator] generation complete", message.timings);
+    const summary = {
+      tokens: message.tokens,
+      tokensPerSecond: Number(message.speed.toFixed(2)),
+      reason: message.reason,
+      ...message.timings,
+    };
+    benchmarkOutput.textContent = `Benchmark ${JSON.stringify(summary)}`;
+    console.info(`[Kalkulator] generation complete ${JSON.stringify(summary)}`);
     finishRun();
     return;
   }
@@ -331,7 +352,6 @@ function revealPrompt(): void {
   run.disabled = false;
 
   gsap.set(form, { autoAlpha: 1 });
-  gsap.set(promptLine, { "--line-scale": reduceMotion ? 1 : 0 });
   gsap.set([prompt, run], {
     opacity: 0,
     y: reduceMotion ? 0 : 3,
@@ -344,11 +364,6 @@ function revealPrompt(): void {
         prompt.focus({ preventScroll: true });
       },
     })
-    .to(promptLine, {
-      "--line-scale": 1,
-      duration: reduceMotion ? 0.2 : 0.62,
-      ease: "power4.inOut",
-    })
     .to(
       prompt,
       {
@@ -357,7 +372,7 @@ function revealPrompt(): void {
         duration: reduceMotion ? 0.2 : 0.42,
         ease: "power4.out",
       },
-      reduceMotion ? 0 : 0.12,
+      0,
     )
     .to(
       run,
@@ -367,7 +382,7 @@ function revealPrompt(): void {
         duration: reduceMotion ? 0.2 : 0.32,
         ease: "power4.out",
       },
-      reduceMotion ? 0 : 0.2,
+      reduceMotion ? 0 : 0.08,
     );
 }
 

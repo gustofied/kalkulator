@@ -536,10 +536,14 @@ function layerInputs(
   return [rmsNorm(hidden.ref), hidden.ref];
 }
 
-function finishLogits(model: LimiteModel, hidden: np.Array): np.Array {
+export function logitsFromHidden(model: LimiteModel, hidden: np.Array): np.Array {
   // Violetto's sigmoid softcap is strictly monotonic, so top-k can operate on
   // raw logits. The sampler applies the softcap to only the 50 survivors.
   return runLinear(model.embedTokens, hidden).astype(np.float32).reshape([C.vocab]);
+}
+
+export function lmHeadWeight(model: LimiteModel): np.Array {
+  return model.embedTokens.weight;
 }
 
 export function prefill(
@@ -597,7 +601,7 @@ export function prefill(
   history0.dispose();
   history12?.dispose();
   history23?.dispose();
-  return finishLogits(model, hidden);
+  return hidden;
 }
 
 export function step(model: LimiteModel, token: number, state: LimiteState): np.Array {
@@ -654,7 +658,7 @@ export function step(model: LimiteModel, token: number, state: LimiteState): np.
   history0.dispose();
   history12?.dispose();
   history23?.dispose();
-  return finishLogits(model, hidden);
+  return hidden;
 }
 
 const mapper = new WeightMapper({
