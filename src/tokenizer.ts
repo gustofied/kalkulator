@@ -15,8 +15,6 @@ type TokenizerData = {
 
 export class ViolettoTokenizer {
   readonly eosToken = 151643;
-  readonly imEndToken = 151645;
-  readonly specialTokenIds = new Set<number>();
   readonly #encoding: tokenizers.BpeEncoding;
 
   constructor(data: TokenizerData) {
@@ -26,7 +24,6 @@ export class ViolettoTokenizer {
       if (token.special || !(token.content in data.model.vocab)) {
         special[token.content] = token.id;
       }
-      if (token.special) this.specialTokenIds.add(token.id);
     }
 
     const byteDecoder = createByteDecoder();
@@ -50,11 +47,7 @@ export class ViolettoTokenizer {
   }
 
   encode(text: string): number[] {
-    return this.#encoding.encodeWithSpecialTokens(text);
-  }
-
-  decode(tokens: number[]): string {
-    return this.#encoding.decode(tokens);
+    return this.#encoding.encodeWithSpecialTokens(text.normalize("NFC"));
   }
 
   createDecoder(): ViolettoStreamDecoder {

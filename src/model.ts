@@ -2,10 +2,10 @@ import { blockUntilReady, jit, nn, numpy as np, tree } from "@jax-js/jax";
 import { safetensors, WeightMapper } from "@jax-js/loaders";
 
 export const MODEL_URL =
-  "https://huggingface.co/gustofied/kalkulator/resolve/main/model-fp16.safetensors";
+  "https://huggingface.co/gustofied/kalkulator/resolve/f169ecbbda90581716849555b6f009a52ac44022/model-fp16.safetensors";
 export const MODEL_BYTES = 2_070_811_520;
 export const TOKENIZER_URL =
-  "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/main/tokenizer.json";
+  "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/b1f3d572ccacb6919f4d64c321b70ba034ddaef2/tokenizer.json";
 
 const C = {
   vocab: 151_680,

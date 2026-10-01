@@ -15,8 +15,8 @@ type WorkerMessage =
         deviceMs?: number;
         tokenizerReadMs?: number;
         tokenizerParseMs?: number;
-        modelReadMs?: number;
-        modelUploadMs?: number;
+        artifactMs?: number;
+        pipelineMs?: number;
       };
     }
   | {
@@ -24,14 +24,12 @@ type WorkerMessage =
       text: string;
       tokens: number;
       speed: number;
-      speeds: number[];
     }
   | {
       type: "done";
       text: string;
       tokens: number;
       speed: number;
-      speeds: number[];
       reason: "complete" | "limit";
       timings: {
         prefillMs?: number;
@@ -89,14 +87,7 @@ let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const answerScroller = createFollowScroller(copyFlow);
-const runtimeParams = new URLSearchParams(location.search);
-const requestedHead = runtimeParams.get("head");
-const headStrategy =
-  requestedHead === "wgsl" ? "wgsl" : "jax";
-const seedValue = runtimeParams.get("seed");
-const seed = seedValue === null ? undefined : Number(seedValue);
-
-console.info("[Kalkulator] preparing JAX.js and WebGPU");
+console.info("[Kalkulator] preparing Violetto and WebGPU");
 startPreparationIntro();
 worker.postMessage({ type: "prepare" });
 
@@ -113,14 +104,7 @@ form.addEventListener("submit", (event) => {
   run.disabled = true;
   resetOutput();
   startWorkingMotion();
-  worker.postMessage({
-    type: "solve",
-    problem,
-    options: {
-      lmHead: headStrategy,
-      ...(Number.isFinite(seed) ? { seed } : {}),
-    },
-  });
+  worker.postMessage({ type: "solve", problem });
 });
 
 worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
@@ -140,10 +124,6 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     setStatus(message.status);
     if (message.progress !== undefined) {
       hint.textContent = `${Math.round(message.progress * 100)}%`;
-    } else if (message.status === "reading cached model") {
-      hint.textContent = "Reading local model";
-    } else if (message.status === "uploading weights") {
-      hint.textContent = "Model cached locally";
     } else if (message.status.startsWith("prefill")) {
       hint.textContent = "Model ready";
     }
