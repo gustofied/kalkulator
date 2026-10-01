@@ -53,7 +53,7 @@ type RunTimings = {
   lmHeadGpuMs?: number;
   lmHeadJaxMs?: number;
   lmHeadChecks?: number;
-  lmHeadVariant?: "scalar" | "unavailable";
+  lmHeadVariant?: "rows4" | "unavailable";
 };
 
 let model: LimiteModel | null = null;

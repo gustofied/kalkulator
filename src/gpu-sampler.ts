@@ -5,7 +5,12 @@ const TOP_K = 50;
 const PARAM_BYTES = 16;
 const LIMITE_HIDDEN_SIZE = 1_280;
 const LIMITE_VOCAB_SIZE = 151_680;
-const HEAD_GROUPS = Math.ceil(LIMITE_VOCAB_SIZE / WORKGROUP_SIZE);
+// Four adjacent vocabulary rows reuse each hidden-state load. A 64-lane
+// workgroup still sorts the same 256-row tile as the reference kernel.
+const HEAD_ROWS_PER_INVOCATION = 4;
+const HEAD_WORKGROUP_SIZE = 64;
+const HEAD_TILE_ROWS = HEAD_WORKGROUP_SIZE * HEAD_ROWS_PER_INVOCATION;
+const HEAD_GROUPS = Math.ceil(LIMITE_VOCAB_SIZE / HEAD_TILE_ROWS);
 const HEAD_CANDIDATES = HEAD_GROUPS * TOP_K;
 
 const LM_HEAD_SHADER = /* wgsl */ `
@@ -16,53 +21,82 @@ enable f16;
 @group(0) @binding(2) var<storage, read_write> output_values: array<f32>;
 @group(0) @binding(3) var<storage, read_write> output_ids: array<u32>;
 
-var<workgroup> values: array<f32, ${WORKGROUP_SIZE}>;
-var<workgroup> ids: array<u32, ${WORKGROUP_SIZE}>;
+var<workgroup> values: array<f32, ${HEAD_TILE_ROWS}>;
+var<workgroup> ids: array<u32, ${HEAD_TILE_ROWS}>;
 
 fn follows(a_value: f32, a_id: u32, b_value: f32, b_id: u32) -> bool {
   return a_value < b_value || (a_value == b_value && a_id > b_id);
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
+@compute @workgroup_size(${HEAD_WORKGROUP_SIZE})
 fn main(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) group_id: vec3<u32>,
 ) {
   let lane = local_id.x;
-  let row = group_id.x * ${WORKGROUP_SIZE}u + lane;
-  var value = -3.402823e38;
+  let local_row = lane * ${HEAD_ROWS_PER_INVOCATION}u;
+  let row = group_id.x * ${HEAD_TILE_ROWS}u + local_row;
+  var sum0 = 0.0;
+  var sum1 = 0.0;
+  var sum2 = 0.0;
+  var sum3 = 0.0;
   if (row < ${LIMITE_VOCAB_SIZE}u) {
-    let row_start = row * ${LIMITE_HIDDEN_SIZE}u;
-    var sum = 0.0;
+    let row0 = row * ${LIMITE_HIDDEN_SIZE}u;
+    let row1 = row0 + ${LIMITE_HIDDEN_SIZE}u;
+    let row2 = row1 + ${LIMITE_HIDDEN_SIZE}u;
+    let row3 = row2 + ${LIMITE_HIDDEN_SIZE}u;
     for (var index = 0u; index < ${LIMITE_HIDDEN_SIZE / 4}u; index++) {
       let offset = index * 4u;
-      sum += hidden[offset] * f32(weights[row_start + offset])
-        + hidden[offset + 1u] * f32(weights[row_start + offset + 1u])
-        + hidden[offset + 2u] * f32(weights[row_start + offset + 2u])
-        + hidden[offset + 3u] * f32(weights[row_start + offset + 3u]);
+      let h0 = hidden[offset];
+      let h1 = hidden[offset + 1u];
+      let h2 = hidden[offset + 2u];
+      let h3 = hidden[offset + 3u];
+      sum0 += h0 * f32(weights[row0 + offset])
+        + h1 * f32(weights[row0 + offset + 1u])
+        + h2 * f32(weights[row0 + offset + 2u])
+        + h3 * f32(weights[row0 + offset + 3u]);
+      sum1 += h0 * f32(weights[row1 + offset])
+        + h1 * f32(weights[row1 + offset + 1u])
+        + h2 * f32(weights[row1 + offset + 2u])
+        + h3 * f32(weights[row1 + offset + 3u]);
+      sum2 += h0 * f32(weights[row2 + offset])
+        + h1 * f32(weights[row2 + offset + 1u])
+        + h2 * f32(weights[row2 + offset + 2u])
+        + h3 * f32(weights[row2 + offset + 3u]);
+      sum3 += h0 * f32(weights[row3 + offset])
+        + h1 * f32(weights[row3 + offset + 1u])
+        + h2 * f32(weights[row3 + offset + 2u])
+        + h3 * f32(weights[row3 + offset + 3u]);
     }
-    value = select(sum, -3.402823e38, sum != sum);
   }
-  values[lane] = value;
-  ids[lane] = select(row, 0xffffffffu, row >= ${LIMITE_VOCAB_SIZE}u);
+  values[local_row] = select(sum0, -3.402823e38, row >= ${LIMITE_VOCAB_SIZE}u || sum0 != sum0);
+  values[local_row + 1u] = select(sum1, -3.402823e38, row + 1u >= ${LIMITE_VOCAB_SIZE}u || sum1 != sum1);
+  values[local_row + 2u] = select(sum2, -3.402823e38, row + 2u >= ${LIMITE_VOCAB_SIZE}u || sum2 != sum2);
+  values[local_row + 3u] = select(sum3, -3.402823e38, row + 3u >= ${LIMITE_VOCAB_SIZE}u || sum3 != sum3);
+  ids[local_row] = select(row, 0xffffffffu, row >= ${LIMITE_VOCAB_SIZE}u);
+  ids[local_row + 1u] = select(row + 1u, 0xffffffffu, row + 1u >= ${LIMITE_VOCAB_SIZE}u);
+  ids[local_row + 2u] = select(row + 2u, 0xffffffffu, row + 2u >= ${LIMITE_VOCAB_SIZE}u);
+  ids[local_row + 3u] = select(row + 3u, 0xffffffffu, row + 3u >= ${LIMITE_VOCAB_SIZE}u);
   workgroupBarrier();
 
   var width = 2u;
-  while (width <= ${WORKGROUP_SIZE}u) {
+  while (width <= ${HEAD_TILE_ROWS}u) {
     var stride = width >> 1u;
     while (stride > 0u) {
-      let other = lane ^ stride;
-      if (other > lane) {
-        let descending = (lane & width) == 0u;
-        let lane_follows = follows(values[lane], ids[lane], values[other], ids[other]);
-        let should_swap = select(!lane_follows, lane_follows, descending);
-        if (should_swap) {
-          let swap_value = values[lane];
-          let swap_id = ids[lane];
-          values[lane] = values[other];
-          ids[lane] = ids[other];
-          values[other] = swap_value;
-          ids[other] = swap_id;
+      for (var item = lane; item < ${HEAD_TILE_ROWS}u; item += ${HEAD_WORKGROUP_SIZE}u) {
+        let other = item ^ stride;
+        if (other > item) {
+          let descending = (item & width) == 0u;
+          let item_follows = follows(values[item], ids[item], values[other], ids[other]);
+          let should_swap = select(!item_follows, item_follows, descending);
+          if (should_swap) {
+            let swap_value = values[item];
+            let swap_id = ids[item];
+            values[item] = values[other];
+            ids[item] = ids[other];
+            values[other] = swap_value;
+            ids[other] = swap_id;
+          }
         }
       }
       workgroupBarrier();
@@ -213,7 +247,7 @@ export class WebGpuSampler {
   readonly #topKPipeline: GPUComputePipeline;
   readonly #samplePipeline: GPUComputePipeline;
   readonly #lmHeadPipeline: GPUComputePipeline | null;
-  readonly lmHeadVariant: "scalar" | "unavailable";
+  readonly lmHeadVariant: "rows4" | "unavailable";
   readonly #dummyIds: GPUBuffer;
   readonly #selected: GPUBuffer;
   readonly #readback: GPUBuffer;
@@ -230,7 +264,7 @@ export class WebGpuSampler {
     topKPipeline: GPUComputePipeline,
     samplePipeline: GPUComputePipeline,
     lmHeadPipeline: GPUComputePipeline | null,
-    lmHeadVariant: "scalar" | "unavailable",
+    lmHeadVariant: "rows4" | "unavailable",
   ) {
     this.#device = device;
     this.#topKPipeline = topKPipeline;
@@ -283,7 +317,7 @@ export class WebGpuSampler {
       device.features.has("shader-f16") &&
       device.limits.maxStorageBufferBindingSize >=
         LIMITE_VOCAB_SIZE * LIMITE_HIDDEN_SIZE * 2;
-    const lmHeadVariant = canCompileLmHead ? "scalar" : "unavailable";
+    const lmHeadVariant = canCompileLmHead ? "rows4" : "unavailable";
     const lmHeadModule = canCompileLmHead
       ? device.createShaderModule({
           label: "kalkulator Limite vocabulary head shader",
