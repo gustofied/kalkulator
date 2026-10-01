@@ -447,7 +447,6 @@ function revealAnswerLayout(): void {
   const artState = !reduceMotion ? Flip.getState(answerArt) : null;
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
-  copyFlow.focus({ preventScroll: true });
   if (artState) {
     Flip.from(artState, {
       duration: 0.68,
@@ -514,11 +513,13 @@ function flushWorkText(value: string): void {
 
 function appendWorkText(value: string): void {
   if (!value) return;
+  const firstWord = !workTextNode?.isConnected;
   if (!workTextNode?.isConnected) {
     workTextNode = document.createTextNode("");
     workCopy.append(workTextNode);
   }
   workTextNode.appendData(value);
+  if (firstWord) copyFlow.focus({ preventScroll: true });
 }
 
 function stopWorkWriter(): void {
@@ -571,7 +572,6 @@ function renderAnswerMath(rawText: string, complete: boolean): boolean {
 
   appendAnswerFragment(text.slice(finalRenderedSource.length));
   finalRenderedSource = text;
-  followLatest(answerScroller);
   return text.trim().length > 0;
 }
 

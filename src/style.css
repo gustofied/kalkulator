@@ -150,7 +150,7 @@ input:focus-visible { outline: 0; }
 
 #result {
   min-height: 0;
-  height: 160px;
+  height: 256px;
   padding: 0;
   overflow: hidden;
 }
@@ -170,12 +170,13 @@ input:focus-visible { outline: 0; }
 }
 
 .answer-section.has-answer .answer {
-  height: 120px;
   display: grid;
   grid-template-columns: 120px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
+
+.answer-copy { min-width: 0; }
 
 .copy-flow {
   min-width: 0;
@@ -187,6 +188,8 @@ input:focus-visible { outline: 0; }
   scrollbar-color: transparent transparent;
   scrollbar-width: thin;
 }
+
+.copy-flow:has(.work-copy:empty) { display: none; }
 
 .copy-flow::-webkit-scrollbar { width: 2px; }
 .copy-flow::-webkit-scrollbar-track { background: transparent; }
@@ -279,7 +282,7 @@ input:focus-visible { outline: 0; }
   overflow-anchor: none;
 }
 
-.work-copy:not(:empty) + .final-copy:not(:empty) { margin-top: 12px; }
+.answer-copy:has(.work-copy:not(:empty)) .final-copy:not(:empty) { margin-top: 8px; }
 
 .answer-section.waiting .answer {
   height: 100%;
@@ -293,7 +296,7 @@ input:focus-visible { outline: 0; }
   margin: 0;
 }
 
-.answer-section.waiting .copy-flow { display: none; }
+.answer-section.waiting .answer-copy { display: none; }
 
 .answer-section.reasoning .work-copy::after,
 .answer-section.writing .final-copy::after {
@@ -329,7 +332,7 @@ input:focus-visible { outline: 0; }
 
   .answer { font-size: 14px; line-height: 20px; }
 
-  #result { height: 144px; }
+  #result { height: min(320px, calc(100dvh - 96px)); }
 
   .answer-art {
     width: 112px;
