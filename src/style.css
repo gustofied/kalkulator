@@ -64,9 +64,11 @@ main {
   width: min(40rem, calc(100% - 48px));
   height: 100dvh;
   margin: 0 auto;
-  padding: 40px 0 0;
+  padding: 24px 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 24px;
 }
 
 #prompt-form {
@@ -148,11 +150,12 @@ input:focus-visible { outline: 0; }
 
 #result {
   min-height: 0;
-  padding: 24px 0 40px;
+  height: 160px;
+  padding: 0;
   overflow: hidden;
 }
 
-.answer-section { min-height: 100%; }
+.answer-section { height: 100%; }
 
 .answer-section.waiting { height: 100%; }
 
@@ -168,7 +171,7 @@ input:focus-visible { outline: 0; }
 }
 
 .answer-section.has-answer .answer {
-  max-height: min(16rem, calc(100dvh - 120px));
+  height: 120px;
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
@@ -212,9 +215,9 @@ input:focus-visible { outline: 0; }
 
 .answer-art {
   position: relative;
-  width: 144px;
+  width: 120px;
   aspect-ratio: 1;
-  margin: 1px 16px 8px 0;
+  margin: 0 16px 0 0;
   float: left;
   line-height: 0;
   will-change: transform, opacity;
@@ -261,9 +264,9 @@ input:focus-visible { outline: 0; }
 .final-copy { white-space: normal; }
 
 .work-copy {
-  color: rgb(24 24 24 / 70%);
-  font-size: 12px;
-  line-height: 16px;
+  color: rgb(24 24 24 / 62%);
+  font-size: 14px;
+  line-height: 20px;
   letter-spacing: 0;
 }
 
@@ -271,7 +274,7 @@ input:focus-visible { outline: 0; }
 .final-copy:empty { display: none; }
 
 .final-copy {
-  clear: both;
+  color: var(--ink);
   overflow-anchor: none;
 }
 
@@ -285,7 +288,7 @@ input:focus-visible { outline: 0; }
 }
 
 .answer-section.waiting .answer-art {
-  width: 184px;
+  width: 160px;
   margin: 0;
   float: none;
 }
@@ -320,31 +323,30 @@ input:focus-visible { outline: 0; }
 @media (max-width: 640px) {
   main {
     width: calc(100% - 32px);
-    padding-top: 32px;
+    padding: 16px 0;
+    gap: 16px;
   }
 
   .prompt-line { gap: 16px; }
 
   .answer { font-size: 14px; line-height: 20px; }
 
-  .work-copy {
-    font-size: 12px;
-    line-height: 16px;
-  }
-
-  #result { padding: 16px 0; }
+  #result { height: 144px; }
 
   .answer-art {
-    width: 128px;
+    width: 112px;
     margin-right: 16px;
-    margin-bottom: 8px;
+    margin-bottom: 0;
   }
 
   .answer-section.waiting .answer-art { width: 128px; }
 }
 
 @media (max-width: 360px) {
-  .answer-section.has-answer .answer-art { width: 96px; }
+  .answer-section.has-answer .answer-art {
+    width: 96px;
+    margin-right: 12px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
