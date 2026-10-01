@@ -39,7 +39,7 @@ JAX.js was chosen because it made an exact custom architecture possible quickly.
 - A completed OPFS checkpoint survives reload without another network download. Warm loads report the local read separately from GPU upload.
 - On every page load, cached weights still need to be read, parsed, uploaded to the GPU, and compiled.
 - Violetto's exact canonical system prompt from `chat_template.jinja` is required; custom system wording caused runaway hidden reasoning in testing.
-- Generation runs in a worker, streams draft work into a collapsible surface, renders the final answer separately, supports Stop, stops after a balanced boxed answer, and has a 768-token hard safety limit.
+- Generation runs in a worker, typesets working text word by word in muted ink, renders the final answer beneath it, stops after a balanced boxed answer, and has a 768-token hard safety limit.
 
 ## Known bottlenecks
 

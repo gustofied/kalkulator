@@ -32,7 +32,7 @@ type WorkerMessage =
       tokens: number;
       speed: number;
       speeds: number[];
-      reason: "complete" | "limit" | "stopped";
+      reason: "complete" | "limit";
       timings: {
         prefillMs?: number;
         firstTokenMs?: number;
@@ -57,7 +57,8 @@ const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
 const answerArtGhost = document.querySelector<HTMLImageElement>(".answer-art-ghost")!;
 const answerArtInk = document.querySelector<HTMLImageElement>(".answer-art-ink")!;
-const answerCopy = document.querySelector<HTMLElement>("#answer-copy")!;
+const workCopy = document.querySelector<HTMLElement>("#work-copy")!;
+const finalCopy = document.querySelector<HTMLElement>("#final-copy")!;
 const bloomShapes = [
   { x: 18, y: 18, at: 0 },
   { x: 82, y: 16, at: 0.72 },
@@ -78,9 +79,14 @@ const worker = new Worker(new URL("./inference.worker.ts", import.meta.url), {
 });
 
 let solving = false;
-let answerRevealed = false;
+let finalRevealed = false;
 let modelReady = false;
 let introTimeline: gsap.core.Timeline | null = null;
+let workingTimeline: gsap.core.Timeline | null = null;
+let workTarget = "";
+let workWritten = "";
+let workComplete = false;
+let workTimer: number | null = null;
 let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -91,21 +97,16 @@ worker.postMessage({ type: "prepare" });
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (!modelReady) return;
-  if (solving) {
-    run.disabled = true;
-    run.textContent = "stopping";
-    setStatus("stopping");
-    worker.postMessage({ type: "stop" });
-    return;
-  }
+  if (!modelReady || solving) return;
 
   const problem = prompt.value.trim();
   if (!problem) return;
   solving = true;
-  run.textContent = "stop";
-  run.dataset.mode = "stop";
+  form.classList.add("solving");
+  prompt.disabled = true;
+  run.disabled = true;
   resetOutput();
+  startWorkingMotion();
   worker.postMessage({ type: "solve", problem });
 });
 
@@ -137,32 +138,23 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   }
 
   if (message.type === "update") {
-    const hasAnswer = renderOutput(message.text);
-    answerSection.classList.toggle("writing", hasAnswer);
-    setStatus(hasAnswer ? "writing" : "thinking");
+    const phase = renderOutput(message.text);
+    setOutputPhase(phase);
     return;
   }
 
   if (message.type === "done") {
-    const hasAnswer = renderOutput(message.text);
-    if (!hasAnswer) {
-      answerSection.classList.remove("waiting");
-      answerSection.classList.add("has-answer");
+    const phase = renderOutput(message.text);
+    if (phase !== "answer") {
+      revealAnswerLayout();
       showAnswerMessage(
-        message.reason === "stopped"
-          ? "Stopped before a final answer."
-          : message.reason === "limit"
-            ? "The model reached its output limit before returning a final answer."
-            : "The model ended before returning a final answer.",
+        message.reason === "limit"
+          ? "No final answer before the output limit."
+          : "No final answer.",
       );
     }
-    answerSection.classList.remove("writing");
-    const finalStatus =
-      message.reason === "stopped"
-        ? "stopped"
-        : message.reason === "limit"
-          ? "limit reached"
-          : "complete";
+    answerSection.classList.remove("reasoning", "writing");
+    const finalStatus = message.reason === "limit" ? "limit reached" : "complete";
     setStatus(finalStatus);
     hint.textContent = message.timings.prefillMs
       ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
@@ -179,20 +171,9 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
 
   console.error("[Kalkulator] preparation or inference failed", message.message);
   stopPreparationIntro();
+  stopWorkingMotion();
 
-  const artState =
-    !reduceMotion && answerSection.classList.contains("waiting")
-      ? Flip.getState(answerArt)
-      : null;
-  answerSection.classList.remove("waiting");
-  answerSection.classList.add("has-answer");
-  if (artState) {
-    Flip.from(artState, {
-      absolute: true,
-      duration: 0.68,
-      ease: "power4.inOut",
-    });
-  }
+  revealAnswerLayout();
   showAnswerMessage(message.message);
   setStatus("error");
   hint.textContent = "Try again or reload the page.";
@@ -202,8 +183,8 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
 worker.addEventListener("error", (event) => {
   console.error("[Kalkulator] inference worker failed", event.error ?? event.message);
   stopPreparationIntro();
-  answerSection.classList.remove("waiting");
-  answerSection.classList.add("has-answer");
+  stopWorkingMotion();
+  revealAnswerLayout();
   showAnswerMessage(event.message || "Inference worker failed.");
   setStatus("error");
   finishRun();
@@ -211,10 +192,18 @@ worker.addEventListener("error", (event) => {
 
 function finishRun(): void {
   solving = false;
-  answerSection.classList.remove("writing");
+  form.classList.remove("solving");
+  answerSection.classList.remove("reasoning", "writing");
+  prompt.disabled = !modelReady;
   run.disabled = !modelReady;
-  run.textContent = "ask";
-  delete run.dataset.mode;
+}
+
+type OutputPhase = "waiting" | "reasoning" | "answer";
+
+function setOutputPhase(phase: OutputPhase): void {
+  answerSection.classList.toggle("reasoning", phase === "reasoning");
+  answerSection.classList.toggle("writing", phase === "answer");
+  setStatus(phase === "answer" ? "writing" : phase === "reasoning" ? "working" : "starting");
 }
 
 function logPreparation(value: string, progress?: number): void {
@@ -293,6 +282,44 @@ function stopPreparationIntro(): void {
   });
 }
 
+function startWorkingMotion(): void {
+  workingTimeline?.kill();
+  workingTimeline = null;
+  gsap.killTweensOf([answerArtInk, ...answerArtBlooms]);
+  gsap.set(answerArtGhost, { opacity: 0 });
+  gsap.set(answerArtInk, { opacity: reduceMotion ? 1 : 0.72 });
+  gsap.set(answerArtBlooms, {
+    "--bloom-core": "18%",
+    "--bloom-edge": "48%",
+    opacity: 0,
+  });
+
+  if (reduceMotion) return;
+  workingTimeline = gsap.timeline({ repeat: -1, repeatDelay: 0.08 });
+  answerArtBlooms.forEach((layer, index) => {
+    const at = index * 0.28;
+    workingTimeline!
+      .to(layer, { opacity: 0.34, duration: 0.52, ease: "power3.out" }, at)
+      .to(layer, { opacity: 0, duration: 0.74, ease: "power2.inOut" }, at + 0.44);
+  });
+}
+
+function stopWorkingMotion(): void {
+  workingTimeline?.kill();
+  workingTimeline = null;
+  gsap.killTweensOf([answerArtInk, ...answerArtBlooms]);
+  gsap.to(answerArtInk, {
+    opacity: 1,
+    duration: reduceMotion ? 0.2 : 0.32,
+    ease: "power3.out",
+  });
+  gsap.to(answerArtBlooms, {
+    opacity: 0,
+    duration: reduceMotion ? 0.2 : 0.18,
+    ease: "power3.out",
+  });
+}
+
 function revealPrompt(): void {
   stopPreparationIntro();
   skipLink.classList.remove("preparing");
@@ -345,28 +372,58 @@ function revealPrompt(): void {
 }
 
 function resetOutput(): void {
-  answerRevealed = false;
-  answerSection.classList.add("waiting");
-  answerSection.classList.remove("has-answer", "writing");
-  answerCopy.replaceChildren();
-  result.scrollTop = 0;
+  stopWorkWriter();
+  gsap.killTweensOf([answerArt, workCopy, finalCopy]);
   gsap.set(answerArt, { clearProps: "transform,opacity" });
-}
-
-function renderOutput(rawText: string): boolean {
-  const output = splitOutput(rawText);
-
-  if (!output.answer.trim()) {
-    answerSection.classList.add("waiting");
-    answerSection.classList.remove("has-answer");
-    answerCopy.replaceChildren();
-    return false;
-  }
-
   const artState =
-    !reduceMotion && answerSection.classList.contains("waiting")
+    !reduceMotion && !answerSection.classList.contains("waiting")
       ? Flip.getState(answerArt)
       : null;
+  finalRevealed = false;
+  workTarget = "";
+  workWritten = "";
+  workComplete = false;
+  answerSection.classList.add("waiting");
+  answerSection.classList.remove("has-answer", "reasoning", "writing");
+  workCopy.replaceChildren();
+  finalCopy.replaceChildren();
+  gsap.set([workCopy, finalCopy], { clearProps: "opacity,transform" });
+  result.scrollTop = 0;
+  if (artState) {
+    Flip.from(artState, {
+      absolute: true,
+      duration: 0.56,
+      ease: "power4.inOut",
+    });
+  }
+}
+
+function renderOutput(rawText: string): OutputPhase {
+  const output = splitOutput(rawText);
+
+  if (output.reasoning.trim()) {
+    revealAnswerLayout();
+    queueWorkText(output.reasoning, !output.thinking);
+  }
+
+  if (!output.answer.trim()) {
+    return output.reasoning.trim() ? "reasoning" : "waiting";
+  }
+
+  flushWorkText(output.reasoning);
+  revealAnswerLayout();
+  const rendered = renderAnswerMath(output.answer);
+  if (rendered && !finalRevealed) {
+    finalRevealed = true;
+    animateFinalIn();
+  }
+  return rendered ? "answer" : output.reasoning.trim() ? "reasoning" : "waiting";
+}
+
+function revealAnswerLayout(): void {
+  if (!answerSection.classList.contains("waiting")) return;
+  stopWorkingMotion();
+  const artState = !reduceMotion ? Flip.getState(answerArt) : null;
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
   if (artState) {
@@ -376,12 +433,63 @@ function renderOutput(rawText: string): boolean {
       ease: "power4.inOut",
     });
   }
-  const rendered = renderAnswerMath(output.answer);
-  if (rendered && !answerRevealed) {
-    answerRevealed = true;
-    animateAnswerIn();
+}
+
+function queueWorkText(value: string, complete: boolean): void {
+  const text = cleanWorkText(value);
+  if (!text.startsWith(workWritten)) {
+    workWritten = "";
+    workCopy.replaceChildren();
   }
-  return rendered;
+  workTarget = text;
+  workComplete = complete;
+  if (workTimer === null) writeNextWorkWord();
+}
+
+function writeNextWorkWord(): void {
+  workTimer = null;
+  if (workWritten === workTarget) return;
+
+  const remaining = workTarget.slice(workWritten.length);
+  const next = remaining.match(
+    workComplete ? /^(\s*\S+(?:\s+|$)|\s+$)/ : /^(\s*\S+\s+)/,
+  )?.[0];
+  if (!next) return;
+
+  const firstWord = workWritten.length === 0;
+  workWritten += next;
+  workCopy.textContent = workWritten;
+  if (firstWord && !reduceMotion) {
+    gsap.fromTo(
+      workCopy,
+      { opacity: 0, y: 2 },
+      { opacity: 1, y: 0, duration: 0.28, ease: "power3.out" },
+    );
+  }
+  scrollToLatest();
+
+  if (workWritten !== workTarget) {
+    const pause = /[.!?;:]\s*$/.test(next) ? 72 : 34;
+    workTimer = window.setTimeout(writeNextWorkWord, reduceMotion ? 0 : pause);
+  }
+}
+
+function flushWorkText(value: string): void {
+  stopWorkWriter();
+  workTarget = cleanWorkText(value);
+  workWritten = workTarget;
+  workComplete = true;
+  workCopy.textContent = workWritten;
+  scrollToLatest();
+}
+
+function stopWorkWriter(): void {
+  if (workTimer !== null) window.clearTimeout(workTimer);
+  workTimer = null;
+}
+
+function cleanWorkText(value: string): string {
+  return value.trimStart().replace(/\n{3,}/g, "\n\n");
 }
 
 function splitOutput(rawText: string): {
@@ -413,7 +521,7 @@ function splitOutput(rawText: string): {
 }
 
 function renderAnswerMath(rawText: string): boolean {
-  answerCopy.replaceChildren();
+  finalCopy.replaceChildren();
   const text = stableMathPrefix(rawText)
     .replace(/\*\*(.*?)\*\*/gs, "$1")
     .replace(/^#{1,6}\s+/gm, "")
@@ -422,7 +530,7 @@ function renderAnswerMath(rawText: string): boolean {
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     const index = match.index ?? 0;
-    answerCopy.append(document.createTextNode(text.slice(cursor, index)));
+    finalCopy.append(document.createTextNode(text.slice(cursor, index)));
     const raw = match[0];
     const display = raw.startsWith("$$") || raw.startsWith("\\[");
     const tex = raw.slice(
@@ -435,29 +543,34 @@ function renderAnswerMath(rawText: string): boolean {
       throwOnError: false,
       strict: false,
     });
-    answerCopy.append(node);
+    finalCopy.append(node);
     cursor = index + raw.length;
   }
-  answerCopy.append(document.createTextNode(text.slice(cursor)));
-  result.scrollTop = result.scrollHeight;
+  finalCopy.append(document.createTextNode(text.slice(cursor)));
+  scrollToLatest();
   return text.trim().length > 0;
 }
 
 function showAnswerMessage(message: string): void {
-  answerCopy.replaceChildren(document.createTextNode(message));
-  if (!answerRevealed) {
-    answerRevealed = true;
-    animateAnswerIn();
+  finalCopy.replaceChildren(document.createTextNode(message));
+  if (!finalRevealed) {
+    finalRevealed = true;
+    animateFinalIn();
   }
 }
 
-function animateAnswerIn(): void {
+function animateFinalIn(): void {
   if (reduceMotion) return;
   gsap.fromTo(
-    answerCopy,
-    { opacity: 0 },
-    { opacity: 1, duration: 0.36, ease: "power3.out" },
+    finalCopy,
+    { opacity: 0, y: 2 },
+    { opacity: 1, y: 0, duration: 0.36, ease: "power3.out" },
   );
+}
+
+function scrollToLatest(): void {
+  const distance = result.scrollHeight - result.scrollTop - result.clientHeight;
+  if (distance < 96) result.scrollTop = result.scrollHeight;
 }
 
 function stableMathPrefix(text: string): string {

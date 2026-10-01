@@ -29,8 +29,7 @@ const RENDER_INTERVAL_MS = 250;
 
 type InboundMessage =
   | { type: "prepare" }
-  | { type: "solve"; problem: string }
-  | { type: "stop" };
+  | { type: "solve"; problem: string };
 
 type RunTimings = {
   deviceMs?: number;
@@ -50,18 +49,12 @@ let model: LimiteModel | null = null;
 let tokenizer: ViolettoTokenizer | null = null;
 let initialized = false;
 let busy = false;
-let stopRequested = false;
 let gpuSampler: WebGpuSampler | null = null;
 let samplerMode: "probe" | "wgsl" | "cpu" = "probe";
 
 self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
-  if (event.data.type === "stop") {
-    stopRequested = true;
-    return;
-  }
   if (busy) return;
   busy = true;
-  stopRequested = false;
   if (event.data.type === "prepare") {
     void prepare().finally(() => {
       busy = false;
@@ -104,7 +97,7 @@ async function solve(problem: string): Promise<void> {
     let lastSpeed = 0;
     let logits: np.Array | null = null;
     let lastRender = 0;
-    let reason: "complete" | "limit" | "stopped" = "limit";
+    let reason: "complete" | "limit" = "limit";
 
     try {
       postStatus(`prefill · ${tokens.length} tok`);
@@ -119,11 +112,6 @@ async function solve(problem: string): Promise<void> {
       const decodeStarted = performance.now();
 
       for (let index = 0; index < HARD_TOKEN_LIMIT; index++) {
-        if (stopRequested) {
-          reason = "stopped";
-          break;
-        }
-
         const current = logits;
         if (!current) throw new Error("Missing decode logits.");
         logits = null;
@@ -162,7 +150,7 @@ async function solve(problem: string): Promise<void> {
           break;
         }
 
-        if (index + 1 < HARD_TOKEN_LIMIT && !stopRequested) {
+        if (index + 1 < HARD_TOKEN_LIMIT) {
           logits = step(tree.ref(activeModel), next, state);
         }
       }

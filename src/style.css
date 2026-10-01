@@ -81,6 +81,8 @@ main {
   pointer-events: none;
 }
 
+#prompt-form.solving { opacity: 0.62; }
+
 .prompt-line {
   --line-scale: 1;
 
@@ -149,7 +151,6 @@ button {
 
 .prompt-line:focus-within button { opacity: 0.68; }
 button:active { opacity: 0.52; transform: scale(0.97); }
-button[data-mode="stop"] { color: var(--violet); opacity: 0.72; }
 button:disabled { cursor: wait; opacity: 0.36; transform: none; }
 
 @media (hover: hover) and (pointer: fine) {
@@ -242,8 +243,22 @@ input:focus-visible { outline: 0; }
 
 .answer-copy {
   min-width: 0;
-  white-space: pre-wrap;
 }
+
+.work-copy,
+.final-copy { white-space: pre-wrap; }
+
+.work-copy {
+  color: rgb(24 24 24 / 52%);
+  font-size: 16px;
+  line-height: 24px;
+  letter-spacing: 0;
+}
+
+.work-copy:empty,
+.final-copy:empty { display: none; }
+
+.work-copy:not(:empty) + .final-copy:not(:empty) { margin-top: 24px; }
 
 .answer-section.waiting .answer {
   height: 100%;
@@ -260,7 +275,8 @@ input:focus-visible { outline: 0; }
 .answer-section.waiting .answer-copy { display: none; }
 .answer-section.waiting .answer::after { display: none; }
 
-.answer-section.writing .answer-copy::after {
+.answer-section.reasoning .work-copy::after,
+.answer-section.writing .final-copy::after {
   width: 1px;
   height: 18px;
   display: inline-block;
@@ -293,6 +309,11 @@ input:focus-visible { outline: 0; }
   .answer {
     font-size: 16px;
     line-height: 24px;
+  }
+
+  .work-copy {
+    font-size: 15px;
+    line-height: 22px;
   }
 
   #result { padding: 24px 0 48px; }
