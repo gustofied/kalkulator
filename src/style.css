@@ -116,6 +116,8 @@ input:focus::placeholder { color: rgb(24 24 24 / 38%); }
 
 button {
   display: inline-grid;
+  position: relative;
+  top: -2px;
   place-items: center;
   padding: 8px 0;
   border: 0;
