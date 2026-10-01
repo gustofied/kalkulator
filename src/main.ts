@@ -54,7 +54,7 @@ const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
 const benchmarkOutput = document.querySelector<HTMLOutputElement>("#benchmark-output")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
-const answer = document.querySelector<HTMLElement>("#answer")!;
+const copyFlow = document.querySelector<HTMLElement>("#copy-flow")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
 const answerArtGhost = document.querySelector<HTMLImageElement>(".answer-art-ghost")!;
 const answerArtInk = document.querySelector<HTMLImageElement>(".answer-art-ink")!;
@@ -93,7 +93,7 @@ let finalRenderedSource = "";
 let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const answerScroller = createFollowScroller(answer);
+const answerScroller = createFollowScroller(copyFlow);
 const benchmarkParams = new URLSearchParams(location.search);
 const requestedHead = benchmarkParams.get("head");
 const benchmarkHead =
@@ -117,7 +117,6 @@ form.addEventListener("submit", (event) => {
   prompt.disabled = true;
   run.disabled = true;
   resetOutput();
-  answer.focus({ preventScroll: true });
   startWorkingMotion();
   worker.postMessage({
     type: "solve",
@@ -448,6 +447,7 @@ function revealAnswerLayout(): void {
   const artState = !reduceMotion ? Flip.getState(answerArt) : null;
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
+  copyFlow.focus({ preventScroll: true });
   if (artState) {
     Flip.from(artState, {
       duration: 0.68,

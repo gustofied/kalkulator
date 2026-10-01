@@ -161,7 +161,6 @@ input:focus-visible { outline: 0; }
 
 .answer {
   min-width: 0;
-  white-space: normal;
   color: var(--ink);
   font-size: 14px;
   line-height: 20px;
@@ -172,6 +171,15 @@ input:focus-visible { outline: 0; }
 
 .answer-section.has-answer .answer {
   height: 120px;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.copy-flow {
+  min-width: 0;
+  height: 120px;
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
@@ -180,45 +188,38 @@ input:focus-visible { outline: 0; }
   scrollbar-width: thin;
 }
 
-.answer-section.has-answer .answer::-webkit-scrollbar { width: 2px; }
-.answer-section.has-answer .answer::-webkit-scrollbar-track { background: transparent; }
-.answer-section.has-answer .answer::-webkit-scrollbar-thumb { background: transparent; }
+.copy-flow::-webkit-scrollbar { width: 2px; }
+.copy-flow::-webkit-scrollbar-track { background: transparent; }
+.copy-flow::-webkit-scrollbar-thumb { background: transparent; }
 
-.answer:focus-visible {
+.copy-flow:focus-visible {
   outline: 0;
 }
 
-.answer-section.has-answer .answer:focus-visible {
+.answer-section.has-answer .copy-flow:focus-visible {
   box-shadow: -2px 0 0 rgb(75 54 95 / 32%);
   scrollbar-color: rgb(24 24 24 / 12%) transparent;
 }
 
-.answer-section.has-answer .answer:focus-visible::-webkit-scrollbar-thumb {
+.answer-section.has-answer .copy-flow:focus-visible::-webkit-scrollbar-thumb {
   background: rgb(24 24 24 / 12%);
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .answer-section.has-answer .answer:hover {
+  .answer-section.has-answer .copy-flow:hover {
     scrollbar-color: rgb(24 24 24 / 12%) transparent;
   }
 
-  .answer-section.has-answer .answer:hover::-webkit-scrollbar-thumb {
+  .answer-section.has-answer .copy-flow:hover::-webkit-scrollbar-thumb {
     background: rgb(24 24 24 / 12%);
   }
-}
-
-.answer::after {
-  display: block;
-  clear: both;
-  content: "";
 }
 
 .answer-art {
   position: relative;
   width: 120px;
   aspect-ratio: 1;
-  margin: 0 16px 0 0;
-  float: left;
+  margin: 0;
   line-height: 0;
   will-change: transform, opacity;
 }
@@ -290,12 +291,9 @@ input:focus-visible { outline: 0; }
 .answer-section.waiting .answer-art {
   width: 160px;
   margin: 0;
-  float: none;
 }
 
-.answer-section.waiting .work-copy,
-.answer-section.waiting .final-copy { display: none; }
-.answer-section.waiting .answer::after { display: none; }
+.answer-section.waiting .copy-flow { display: none; }
 
 .answer-section.reasoning .work-copy::after,
 .answer-section.writing .final-copy::after {
@@ -335,8 +333,10 @@ input:focus-visible { outline: 0; }
 
   .answer-art {
     width: 112px;
-    margin-right: 16px;
-    margin-bottom: 0;
+  }
+
+  .answer-section.has-answer .answer {
+    grid-template-columns: 112px minmax(0, 1fr);
   }
 
   .answer-section.waiting .answer-art { width: 128px; }
@@ -345,7 +345,11 @@ input:focus-visible { outline: 0; }
 @media (max-width: 360px) {
   .answer-section.has-answer .answer-art {
     width: 96px;
-    margin-right: 12px;
+  }
+
+  .answer-section.has-answer .answer {
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 12px;
   }
 }
 
