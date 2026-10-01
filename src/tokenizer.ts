@@ -56,6 +56,32 @@ export class ViolettoTokenizer {
   decode(tokens: number[]): string {
     return this.#encoding.decode(tokens);
   }
+
+  createDecoder(): ViolettoStreamDecoder {
+    return new ViolettoStreamDecoder(this.#encoding);
+  }
+}
+
+export class ViolettoStreamDecoder {
+  readonly #encoding: tokenizers.BpeEncoding;
+  readonly #utf8 = new TextDecoder();
+  #text = "";
+
+  constructor(encoding: tokenizers.BpeEncoding) {
+    this.#encoding = encoding;
+  }
+
+  push(token: number): string {
+    this.#text += this.#utf8.decode(this.#encoding.decodeBytes([token]), {
+      stream: true,
+    });
+    return this.#text;
+  }
+
+  finish(): string {
+    this.#text += this.#utf8.decode();
+    return this.#text;
+  }
 }
 
 function createByteDecoder(): Map<string, number> {

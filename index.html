@@ -7,49 +7,59 @@
       name="description"
       content="Limite Violetto runs locally in your browser with jax-js and WebGPU."
     />
-    <link
-      rel="icon"
-      type="image/svg+xml"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%235727e6'/%3E%3Cpath d='M15 19h34v7H27l19 19H35L15 25z' fill='white'/%3E%3C/svg%3E"
+    <meta property="og:title" content="Kalkulator" />
+    <meta
+      property="og:description"
+      content="Paradigma's Limite 1B Violetto, running locally with JAX.js and WebGPU."
     />
-    <title>kalkulator</title>
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://kalkulator.adamsioud.com" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23eeeae1'/%3E%3Ctext x='12' y='49' font-family='serif' font-size='50' fill='%231b1916'%3EK%3C/text%3E%3C/svg%3E" />
+    <title>Kalkulator — Violetto in your browser</title>
   </head>
   <body>
-    <main>
-      <header>
-        <h1>kalkulator</h1>
-        <span>Violetto 1B · local WebGPU</span>
+    <a class="skip-link" href="#prompt">Skip to problem</a>
+    <main id="main-content">
+      <header class="site-header">
+        <h1>Kalkulator</h1>
+        <p class="imprint">Violetto · in-browser mathematics</p>
       </header>
 
-      <section class="workbench">
-        <form id="prompt-form">
-          <label for="prompt">Problem</label>
+      <form id="prompt-form">
+        <div class="prompt-line">
+          <label class="visually-hidden" for="prompt">Problem</label>
           <textarea
             id="prompt"
-            rows="6"
+            rows="1"
             spellcheck="false"
-            placeholder="Type a mathematics problem…"
+            autocomplete="off"
+            aria-describedby="hint"
+            placeholder="Write a problem…"
             required
           ></textarea>
-          <div class="form-row">
-            <small id="hint">1.93 GiB model download.</small>
-            <button id="run" type="submit">Solve</button>
-          </div>
-        </form>
+          <button id="run" type="submit"><span>ask</span></button>
+        </div>
+        <div class="form-meta">
+          <small id="hint">The model is kept on this machine after its first use.</small>
+          <span id="status" aria-live="polite" aria-atomic="true">idle</span>
+        </div>
+      </form>
 
-        <article id="result" aria-live="polite">
-          <div class="result-head">
-            <span>Solution</span>
-            <span id="status">idle</span>
+      <article id="result" aria-label="Violetto answer">
+        <section id="answer-section" class="answer-section waiting">
+          <div id="answer" class="answer" aria-live="polite">
+            <figure id="answer-art" class="answer-art" aria-hidden="true">
+              <img src="./letter-k-holbein.jpg" alt="" />
+            </figure>
+            <div id="answer-copy" class="answer-copy"></div>
           </div>
-          <div id="answer" class="answer muted">Ready.</div>
-          <svg id="trace" aria-label="Generation speed"></svg>
-        </article>
-      </section>
+        </section>
+      </article>
 
-      <footer>
-        <span>Runs on your GPU. Nothing is sent.</span>
-        <span><a href="https://paradigma.inc/blog/limite-1b-violetto/">model</a> · <a href="https://jax-js.com">runtime</a></span>
+      <footer class="site-footer">
+        <span>Private; the work remains on your GPU.</span>
+        <span><a href="https://huggingface.co/paradigma-inc/limite-1b-violetto">Limite</a> · <a href="https://jax-js.com">JAX.js</a> · WebGPU</span>
+        <span>Woodcut after <a href="https://www.nga.gov/artworks/11935-letter-k">Holbein, c. 1523</a></span>
       </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
