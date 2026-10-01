@@ -1,14 +1,13 @@
 @import "katex/dist/katex.min.css";
 
 :root {
-  color: #1b1916;
-  background: #ecece8;
-  font-family: Georgia, "Times New Roman", serif;
+  color: #181818;
+  background: #ffffff;
+  font-family: "Courier Prime", "Courier New", monospace;
   font-synthesis: none;
-  --paper: #ecece8;
-  --ink: #1b1916;
-  --muted: #716c63;
-  --faint: rgb(27 25 22 / 18%);
+  --paper: #ffffff;
+  --ink: #181818;
+  --ghost: rgb(24 24 24 / 36%);
   --violet: #4b365f;
   --motion: cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -26,23 +25,10 @@ body {
   margin: 0;
   overflow: hidden;
   color: var(--ink);
-  background:
-    radial-gradient(circle at 20% 12%, rgb(255 255 255 / 34%), transparent 38%),
-    var(--paper);
+  background: var(--paper);
 }
 
-body::before {
-  position: fixed;
-  z-index: 4;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.64' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E");
-  content: "";
-  opacity: 0.075;
-  pointer-events: none;
-  mix-blend-mode: multiply;
-}
-
-button, textarea { font: inherit; }
+button, input { font: inherit; }
 
 .visually-hidden {
   position: absolute;
@@ -58,160 +44,132 @@ button, textarea { font: inherit; }
 
 .skip-link {
   position: fixed;
-  z-index: 5;
+  z-index: 3;
   top: 8px;
   left: 8px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   color: var(--paper);
   background: var(--ink);
   transform: translateY(-80px);
-  transition: transform 500ms var(--motion);
+  transition: transform 700ms var(--motion);
 }
 
 .skip-link:focus { transform: translateY(0); }
+.skip-link.preparing { display: none; }
 
 main {
   position: relative;
   z-index: 1;
-  width: min(68rem, calc(100% - 64px));
+  width: min(52rem, calc(100% - 48px));
   height: 100dvh;
   margin: 0 auto;
+  padding: 40px 0 0;
   display: grid;
-  grid-template-rows: 72px auto minmax(0, 1fr) 52px;
-}
-
-.site-header, .site-footer, .form-meta {
-  display: flex;
-  align-items: center;
-}
-
-.site-header {
-  justify-content: space-between;
-  gap: 24px;
-  border-bottom: 1px solid var(--ink);
-}
-
-.site-header h1 {
-  margin: 0;
-  font-size: 15px;
-  line-height: 20px;
-  font-weight: 400;
-  font-family: "Courier Prime", "Courier New", monospace;
-  text-transform: lowercase;
-  letter-spacing: 0.08em;
-}
-
-.imprint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-family: "Courier Prime", "Courier New", monospace;
-  font-style: italic;
-  line-height: 16px;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 #prompt-form {
-  width: min(46rem, 100%);
+  width: min(40rem, 100%);
   margin: 0 auto;
-  padding: 34px 0 12px;
+  will-change: opacity, transform, filter;
+}
+
+#prompt-form.preparing {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .prompt-line {
+  --line-scale: 1;
+
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 24px;
-  border-bottom: 1px solid var(--ink);
 }
 
-textarea {
+.prompt-line::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: rgb(24 24 24 / 16%);
+  content: "";
+  transform: scaleX(var(--line-scale));
+  transform-origin: left center;
+  transition: background-color 700ms var(--motion);
+}
+
+.prompt-line:focus-within::after { background: var(--ink); }
+
+input {
   width: 100%;
-  min-height: 52px;
-  max-height: 128px;
-  resize: none;
-  padding: 7px 0 11px;
+  min-width: 0;
+  padding: 8px 0;
   border: 0;
   outline: 0;
-  overflow-y: auto;
   color: var(--ink);
   background: transparent;
-  font-size: 26px;
-  line-height: 34px;
-  font-weight: 400;
-  letter-spacing: -0.015em;
+  font-size: 16px;
+  line-height: 24px;
+  letter-spacing: 0;
+  caret-color: var(--violet);
 }
 
-textarea::placeholder {
-  color: #837e75;
-  font-style: italic;
-  opacity: 0.66;
+input::placeholder {
+  color: rgb(24 24 24 / 28%);
+  opacity: 1;
 }
 
 button {
-  margin: 0 0 12px;
-  padding: 0;
+  padding: 8px 0;
   border: 0;
   color: var(--ink);
   background: transparent;
-  font-family: "Courier Prime", "Courier New", monospace;
   font-size: 14px;
   line-height: 20px;
   letter-spacing: 0.04em;
   cursor: pointer;
-  transition: color 180ms ease;
+  opacity: 0.34;
+  transition: opacity 700ms var(--motion);
 }
 
-button:hover, button[data-mode="stop"] { color: var(--violet); }
+button:hover, .prompt-line:focus-within button { opacity: 0.72; }
+button:active { opacity: 0.28; }
+button[data-mode="stop"] { color: var(--violet); }
+button:disabled { cursor: wait; opacity: 0.36; }
 
-button:disabled {
-  cursor: wait;
-  opacity: 0.5;
-}
-
-button:focus-visible, textarea:focus-visible, a:focus-visible {
+button:focus-visible, a:focus-visible {
   outline: 1px solid var(--violet);
-  outline-offset: 5px;
+  outline-offset: 4px;
 }
 
-.form-meta {
-  min-height: 28px;
-  justify-content: space-between;
-  gap: 24px;
-  color: var(--muted);
-  font-family: "Courier Prime", "Courier New", monospace;
-  font-size: 11px;
-  font-style: italic;
-  line-height: 16px;
-}
-
-#status {
-  color: var(--ink);
-  font-style: normal;
-  letter-spacing: 0.04em;
-}
+input:focus-visible { outline: 0; }
 
 #result {
-  width: min(46rem, 100%);
   min-height: 0;
-  margin: 0 auto;
-  padding: 28px 0 56px;
+  padding: 32px 0 64px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: var(--faint) transparent;
+  scrollbar-color: rgb(24 24 24 / 20%) transparent;
   scrollbar-width: thin;
 }
 
 .answer-section { min-height: 100%; }
 
+.answer-section.waiting { height: 100%; }
+
 .answer {
   min-width: 0;
-  white-space: pre-wrap;
+  white-space: normal;
   color: var(--ink);
-  font-family: "Courier Prime", "Courier New", monospace;
   font-size: 18px;
-  line-height: 1.48;
+  line-height: 28px;
   font-weight: 400;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.01em;
   text-wrap: pretty;
 }
 
@@ -222,112 +180,116 @@ button:focus-visible, textarea:focus-visible, a:focus-visible {
 }
 
 .answer-art {
-  width: 176px;
-  margin: 3px 24px 12px 0;
+  position: relative;
+  width: 184px;
+  aspect-ratio: 1;
+  margin: 1px 24px 12px 0;
   float: left;
+  line-height: 0;
+  will-change: transform, opacity;
 }
 
 .answer-art img {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  aspect-ratio: 1;
+  height: 100%;
   display: block;
-  object-fit: cover;
-  filter: grayscale(1) contrast(1.62) brightness(0.9);
+  object-fit: contain;
+  filter: grayscale(1) contrast(1.12);
   mix-blend-mode: multiply;
 }
 
-.answer-copy { min-width: 0; }
+.answer-art-ghost { opacity: 0.08; }
+
+.answer-art-ink { opacity: 0; }
+
+.answer-art-bloom {
+  --bloom-x: 50%;
+  --bloom-y: 50%;
+  --bloom-core: 0%;
+  --bloom-edge: 0%;
+
+  opacity: 0;
+  -webkit-mask-image: radial-gradient(
+    ellipse farthest-corner at var(--bloom-x) var(--bloom-y),
+    #000 0%,
+    #000 var(--bloom-core),
+    transparent var(--bloom-edge)
+  );
+  mask-image: radial-gradient(
+    ellipse farthest-corner at var(--bloom-x) var(--bloom-y),
+    #000 0%,
+    #000 var(--bloom-core),
+    transparent var(--bloom-edge)
+  );
+  will-change: opacity;
+}
+
+.answer-copy {
+  min-width: 0;
+  white-space: pre-wrap;
+}
 
 .answer-section.waiting .answer {
-  min-height: 19rem;
+  height: 100%;
   display: grid;
   place-items: center;
 }
 
 .answer-section.waiting .answer-art {
-  width: 116px;
+  width: 184px;
   margin: 0;
   float: none;
-  opacity: 0.08;
 }
 
+.answer-section.waiting .answer-copy { display: none; }
+.answer-section.waiting .answer::after { display: none; }
+
 .answer-section.writing .answer-copy::after {
-  width: 1px;
-  height: 1em;
+  width: 2px;
+  height: 20px;
   display: inline-block;
-  margin-left: 3px;
-  background: var(--violet);
+  margin-left: 4px;
+  background: var(--ink);
   content: "";
-  vertical-align: -0.12em;
+  vertical-align: -3px;
   animation: caret 950ms steps(1, end) infinite;
 }
 
 .katex-display {
-  margin: 26px 0;
+  margin: 24px 0;
   overflow-x: auto;
   overflow-y: hidden;
 }
-
-.site-footer {
-  justify-content: space-between;
-  gap: 24px;
-  border-top: 1px solid var(--faint);
-  color: var(--muted);
-  font-family: "Courier Prime", "Courier New", monospace;
-  font-size: 10px;
-  font-style: normal;
-  line-height: 16px;
-}
-
-a {
-  color: inherit;
-  text-decoration-color: rgb(27 25 22 / 38%);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
-  transition: color 180ms ease;
-}
-
-a:hover { color: var(--violet); }
 
 @keyframes caret {
   0%, 48% { opacity: 1; }
   49%, 100% { opacity: 0; }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 640px) {
   main {
-    width: min(calc(100% - 28px), 42rem);
-    grid-template-rows: 60px auto minmax(0, 1fr);
+    width: calc(100% - 32px);
+    padding-top: 32px;
   }
 
-  .imprint { display: none; }
-
-  #prompt-form { padding-top: 20px; }
-
-  .prompt-line, .form-meta { gap: 12px; }
-
-  textarea {
-    font-size: 21px;
-    line-height: 29px;
-  }
-
-  #hint { max-width: 14rem; }
-
-  #result { padding: 22px 0 44px; }
+  .prompt-line { gap: 16px; }
 
   .answer {
     font-size: 16px;
-    line-height: 1.55;
+    line-height: 24px;
   }
+
+  #result { padding: 24px 0 48px; }
 
   .answer-art {
-    width: 108px;
-    margin-right: 18px;
+    width: 128px;
+    margin-right: 16px;
+    margin-bottom: 8px;
   }
 
-  .answer-section.waiting .answer { min-height: 12rem; }
-  .answer-section.waiting .answer-art { width: 88px; }
-  .site-footer { display: none; }
+  .answer-section.waiting .answer-art { width: 128px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

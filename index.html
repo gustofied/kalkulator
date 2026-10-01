@@ -18,49 +18,39 @@
     <title>Kalkulator — Violetto in your browser</title>
   </head>
   <body>
-    <a class="skip-link" href="#prompt">Skip to problem</a>
+    <a class="skip-link preparing" href="#prompt" aria-hidden="true" tabindex="-1">Skip to problem</a>
     <main id="main-content">
-      <header class="site-header">
-        <h1>Kalkulator</h1>
-        <p class="imprint">Violetto · in-browser mathematics</p>
-      </header>
-
-      <form id="prompt-form">
+      <form id="prompt-form" class="preparing" aria-hidden="true">
         <div class="prompt-line">
           <label class="visually-hidden" for="prompt">Problem</label>
-          <textarea
+          <input
             id="prompt"
-            rows="1"
+            type="text"
             spellcheck="false"
             autocomplete="off"
             aria-describedby="hint"
-            placeholder="Write a problem…"
+            placeholder="write a problem"
+            disabled
             required
-          ></textarea>
-          <button id="run" type="submit"><span>ask</span></button>
+          />
+          <button id="run" type="submit" disabled><span>ask</span></button>
         </div>
-        <div class="form-meta">
-          <small id="hint">The model is kept on this machine after its first use.</small>
-          <span id="status" aria-live="polite" aria-atomic="true">idle</span>
-        </div>
+        <small id="hint" class="visually-hidden">The model is kept on this machine after its first use.</small>
+        <span id="status" class="visually-hidden" aria-live="polite" aria-atomic="true">idle</span>
       </form>
 
       <article id="result" aria-label="Violetto answer">
         <section id="answer-section" class="answer-section waiting">
           <div id="answer" class="answer" aria-live="polite">
             <figure id="answer-art" class="answer-art" aria-hidden="true">
-              <img src="./letter-k-holbein.jpg" alt="" />
+              <img class="answer-art-ghost" src="./gothic-k-scholar.png" alt="" />
+              <img class="answer-art-ink" src="./gothic-k-scholar.png" alt="" />
             </figure>
             <div id="answer-copy" class="answer-copy"></div>
           </div>
         </section>
       </article>
 
-      <footer class="site-footer">
-        <span>Private; the work remains on your GPU.</span>
-        <span><a href="https://huggingface.co/paradigma-inc/limite-1b-violetto">Limite</a> · <a href="https://jax-js.com">JAX.js</a> · WebGPU</span>
-        <span>Woodcut after <a href="https://www.nga.gov/artworks/11935-letter-k">Holbein, c. 1523</a></span>
-      </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

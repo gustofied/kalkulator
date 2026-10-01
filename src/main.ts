@@ -1,12 +1,24 @@
 import "@fontsource/courier-prime/400.css";
-import "@fontsource/courier-prime/400-italic.css";
 import { gsap } from "gsap";
+import { Flip } from "gsap/Flip";
 import katex from "katex";
 
 import "./style.css";
 
+gsap.registerPlugin(Flip);
+
 type WorkerMessage =
   | { type: "status"; status: string; progress?: number }
+  | {
+      type: "ready";
+      timings: {
+        deviceMs?: number;
+        tokenizerReadMs?: number;
+        tokenizerParseMs?: number;
+        modelReadMs?: number;
+        modelUploadMs?: number;
+      };
+    }
   | {
       type: "update";
       text: string;
@@ -34,33 +46,49 @@ type WorkerMessage =
   | { type: "error"; message: string };
 
 const form = document.querySelector<HTMLFormElement>("#prompt-form")!;
-const prompt = document.querySelector<HTMLTextAreaElement>("#prompt")!;
+const skipLink = document.querySelector<HTMLAnchorElement>(".skip-link")!;
+const promptLine = document.querySelector<HTMLElement>(".prompt-line")!;
+const prompt = document.querySelector<HTMLInputElement>("#prompt")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
 const result = document.querySelector<HTMLElement>("#result")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
+const answerArtGhost = document.querySelector<HTMLImageElement>(".answer-art-ghost")!;
+const answerArtInk = document.querySelector<HTMLImageElement>(".answer-art-ink")!;
 const answerCopy = document.querySelector<HTMLElement>("#answer-copy")!;
+const bloomShapes = [
+  { x: 18, y: 18, at: 0 },
+  { x: 82, y: 16, at: 0.72 },
+  { x: 18, y: 76, at: 1.4 },
+  { x: 77, y: 72, at: 2.02 },
+  { x: 50, y: 48, at: 2.55 },
+] as const;
+const answerArtBlooms = bloomShapes.map((bloom) => {
+  const layer = answerArtInk.cloneNode(false) as HTMLImageElement;
+  layer.className = "answer-art-bloom";
+  layer.style.setProperty("--bloom-x", `${bloom.x}%`);
+  layer.style.setProperty("--bloom-y", `${bloom.y}%`);
+  answerArt.insertBefore(layer, answerArtInk);
+  return layer;
+});
 const worker = new Worker(new URL("./inference.worker.ts", import.meta.url), {
   type: "module",
 });
 
 let solving = false;
 let answerRevealed = false;
+let modelReady = false;
+let introTimeline: gsap.core.Timeline | null = null;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-if (!reduceMotion) {
-  gsap
-    .timeline({ defaults: { duration: 1.1, ease: "power2.out" } })
-    .from(".site-header", { opacity: 0 })
-    .from("#prompt-form", { opacity: 0 }, "-=0.75")
-    .from("#result", { opacity: 0 }, "-=0.85")
-    .from(".site-footer", { opacity: 0 }, "-=0.95");
-}
+startPreparationIntro();
+worker.postMessage({ type: "prepare" });
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (!modelReady) return;
   if (solving) {
     run.disabled = true;
     run.textContent = "Stopping";
@@ -80,7 +108,17 @@ form.addEventListener("submit", (event) => {
 
 worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   const message = event.data;
+  if (message.type === "ready") {
+    modelReady = true;
+    setStatus("ready");
+    hint.textContent = "Ready";
+    revealPrompt();
+    console.info("Kalkulator ready", JSON.stringify(message.timings));
+    return;
+  }
+
   if (message.type === "status") {
+    if (!modelReady) return;
     setStatus(message.status);
     if (message.progress !== undefined) {
       hint.textContent = `${Math.round(message.progress * 100)}%`;
@@ -135,8 +173,21 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
     return;
   }
 
+  stopPreparationIntro();
+
+  const artState =
+    !reduceMotion && answerSection.classList.contains("waiting")
+      ? Flip.getState(answerArt)
+      : null;
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
+  if (artState) {
+    Flip.from(artState, {
+      absolute: true,
+      duration: 0.9,
+      ease: "power3.inOut",
+    });
+  }
   showAnswerMessage(message.message);
   setStatus("error");
   hint.textContent = "Try again or reload the page.";
@@ -145,6 +196,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
 
 worker.addEventListener("error", (event) => {
   console.error(event.error ?? event.message);
+  stopPreparationIntro();
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
   showAnswerMessage(event.message || "Inference worker failed.");
@@ -155,9 +207,119 @@ worker.addEventListener("error", (event) => {
 function finishRun(): void {
   solving = false;
   answerSection.classList.remove("writing");
-  run.disabled = false;
+  run.disabled = !modelReady;
   run.textContent = "ask";
   delete run.dataset.mode;
+}
+
+function startPreparationIntro(): void {
+  gsap.set(answerArtGhost, { opacity: reduceMotion ? 0.16 : 0.08 });
+  gsap.set(answerArtInk, { opacity: reduceMotion ? 0.18 : 0 });
+
+  if (reduceMotion) return;
+  gsap.from(answerArt, {
+    opacity: 0,
+    scale: 0.98,
+    duration: 1.1,
+    ease: "power2.out",
+  });
+  introTimeline = gsap.timeline({ repeat: -1, repeatDelay: 0.55 });
+  bloomShapes.forEach((bloom, index) => {
+    const layer = answerArtBlooms[index];
+    introTimeline!
+      .set(layer, { "--bloom-core": "0%", "--bloom-edge": "0%", opacity: 0 }, 0)
+      .to(
+        layer,
+        { opacity: 0.96, duration: 0.65, ease: "power2.out" },
+        bloom.at,
+      )
+      .to(
+        layer,
+        {
+          "--bloom-core": "68%",
+          "--bloom-edge": "100%",
+          duration: 4.15,
+          ease: "power1.inOut",
+        },
+        bloom.at,
+      );
+  });
+  introTimeline
+    .to(answerArtInk, { opacity: 1, duration: 0.9, ease: "power2.out" }, 6.15)
+    .to(answerArtBlooms, { opacity: 0, duration: 0.45, ease: "power1.out" }, 6.35)
+    .to(answerArtInk, { opacity: 0, duration: 1.3, ease: "power2.inOut" }, 8.05);
+}
+
+function stopPreparationIntro(): void {
+  introTimeline?.kill();
+  introTimeline = null;
+  gsap.killTweensOf([answerArt, answerArtGhost, answerArtInk, ...answerArtBlooms]);
+  gsap.to(answerArtInk, {
+    opacity: 1,
+    duration: reduceMotion ? 0.2 : 0.7,
+    ease: "power2.out",
+  });
+  gsap.to(answerArtBlooms, {
+    opacity: 0,
+    duration: reduceMotion ? 0.2 : 0.45,
+    ease: "power2.out",
+  });
+  gsap.to(answerArtGhost, {
+    opacity: 0,
+    duration: reduceMotion ? 0.2 : 0.5,
+    ease: "power2.out",
+  });
+}
+
+function revealPrompt(): void {
+  stopPreparationIntro();
+  skipLink.classList.remove("preparing");
+  skipLink.setAttribute("aria-hidden", "false");
+  skipLink.tabIndex = 0;
+  form.classList.remove("preparing");
+  form.setAttribute("aria-hidden", "false");
+  prompt.disabled = false;
+  run.disabled = false;
+
+  gsap.set(form, { autoAlpha: 1 });
+  gsap.set(promptLine, { "--line-scale": reduceMotion ? 1 : 0 });
+  gsap.set([prompt, run], {
+    opacity: 0,
+    y: reduceMotion ? 0 : 5,
+  });
+
+  gsap
+    .timeline({
+      onComplete: () => {
+        gsap.set([prompt, run], { clearProps: "opacity,transform" });
+        prompt.focus({ preventScroll: true });
+      },
+    })
+    .to(promptLine, {
+      "--line-scale": 1,
+      duration: reduceMotion ? 0.2 : 0.9,
+      ease: "power3.inOut",
+    })
+    .to(
+      prompt,
+      {
+        opacity: 1,
+        y: 0,
+        duration: reduceMotion ? 0.2 : 0.65,
+        ease: "power3.out",
+      },
+      reduceMotion ? 0 : 0.18,
+    )
+    .to(
+      run,
+      {
+        opacity: 0.34,
+        y: 0,
+        duration: reduceMotion ? 0.2 : 0.55,
+        ease: "power3.out",
+      },
+      reduceMotion ? 0 : 0.32,
+    );
 }
 
 function resetOutput(): void {
@@ -179,8 +341,19 @@ function renderOutput(rawText: string): boolean {
     return false;
   }
 
+  const artState =
+    !reduceMotion && answerSection.classList.contains("waiting")
+      ? Flip.getState(answerArt)
+      : null;
   answerSection.classList.remove("waiting");
   answerSection.classList.add("has-answer");
+  if (artState) {
+    Flip.from(artState, {
+      absolute: true,
+      duration: 0.9,
+      ease: "power3.inOut",
+    });
+  }
   const rendered = renderAnswerMath(output.answer);
   if (rendered && !answerRevealed) {
     answerRevealed = true;
@@ -258,11 +431,6 @@ function showAnswerMessage(message: string): void {
 
 function animateAnswerIn(): void {
   if (reduceMotion) return;
-  gsap.fromTo(
-    answerArt,
-    { opacity: 0 },
-    { opacity: 1, duration: 1.1, ease: "power2.out" },
-  );
   gsap.fromTo(
     answerCopy,
     { opacity: 0 },

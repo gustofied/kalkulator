@@ -9,11 +9,12 @@ Make Violetto Limite 1B usable as a private, browser-only mathematics playground
 - Source: <https://github.com/gustofied/kalkulator>
 - Live: <https://gustofied.github.io/kalkulator/>
 - Runtime: JAX.js on WebGPU
-- Interface: static Vite/TypeScript, KaTeX for mathematics, D3 for generation speed
+- Interface: static Vite/TypeScript with GSAP motion and KaTeX mathematics
 - Model: 1.93 GiB FP16 safetensors hosted separately on Hugging Face
 - Deployment: GitHub Pages through `.github/workflows/pages.yml`
 - Cache: `@jax-js/loaders` OPFS storage with validated checkpoint size
 - Execution: WebGPU inference in a dedicated Web Worker
+- Startup: the worker prepares the device, tokenizer, sampler, and model before revealing the prompt
 - Sampling: specialized WGSL hierarchical top-k plus temperature/top-p selection, with CPU verification and fallback
 - Decode layout: fused QKV/gate-up/gate projections, shared RoPE factors, and packed KV tensors
 - Streaming: incremental UTF-8 token decoding and 250 ms UI render batches

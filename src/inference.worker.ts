@@ -28,6 +28,7 @@ const TOP_P = 0.95;
 const RENDER_INTERVAL_MS = 250;
 
 type InboundMessage =
+  | { type: "prepare" }
   | { type: "solve"; problem: string }
   | { type: "stop" };
 
@@ -61,10 +62,30 @@ self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
   if (busy) return;
   busy = true;
   stopRequested = false;
+  if (event.data.type === "prepare") {
+    void prepare().finally(() => {
+      busy = false;
+    });
+    return;
+  }
   void solve(event.data.problem).finally(() => {
     busy = false;
   });
 });
+
+async function prepare(): Promise<void> {
+  const timings: RunTimings = {};
+  try {
+    await setup(timings);
+    postMessage({ type: "ready", timings });
+  } catch (error) {
+    console.error(error);
+    postMessage({
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 async function solve(problem: string): Promise<void> {
   const timings: RunTimings = {};
