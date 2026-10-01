@@ -52,9 +52,9 @@ const prompt = document.querySelector<HTMLInputElement>("#prompt")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
-const result = document.querySelector<HTMLElement>("#result")!;
 const benchmarkOutput = document.querySelector<HTMLOutputElement>("#benchmark-output")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
+const answer = document.querySelector<HTMLElement>("#answer")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
 const answerArtGhost = document.querySelector<HTMLImageElement>(".answer-art-ghost")!;
 const answerArtInk = document.querySelector<HTMLImageElement>(".answer-art-ink")!;
@@ -88,9 +88,12 @@ let workTarget = "";
 let workWritten = "";
 let workComplete = false;
 let workTimer: number | null = null;
+let workTextNode: Text | null = null;
+let finalRenderedSource = "";
 let preparationStage = "";
 let preparationProgressBucket = -1;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const answerScroller = createFollowScroller(answer);
 const benchmarkParams = new URLSearchParams(location.search);
 const requestedHead = benchmarkParams.get("head");
 const benchmarkHead =
@@ -109,10 +112,12 @@ form.addEventListener("submit", (event) => {
   const problem = prompt.value.trim();
   if (!problem) return;
   solving = true;
+  answerSection.setAttribute("aria-busy", "true");
   form.classList.add("solving");
   prompt.disabled = true;
   run.disabled = true;
   resetOutput();
+  answer.focus({ preventScroll: true });
   startWorkingMotion();
   worker.postMessage({
     type: "solve",
@@ -152,13 +157,13 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   }
 
   if (message.type === "update") {
-    const phase = renderOutput(message.text);
+    const phase = renderOutput(message.text, false);
     setOutputPhase(phase);
     return;
   }
 
   if (message.type === "done") {
-    const phase = renderOutput(message.text);
+    const phase = renderOutput(message.text, true);
     if (phase !== "answer") {
       revealAnswerLayout();
       showAnswerMessage(
@@ -168,7 +173,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
       );
     }
     answerSection.classList.remove("reasoning", "writing");
-    const finalStatus = message.reason === "limit" ? "limit reached" : "complete";
+    const finalStatus = message.reason === "limit" ? "output limit reached" : "answer complete";
     setStatus(finalStatus);
     hint.textContent = message.timings.prefillMs
       ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
@@ -213,6 +218,7 @@ worker.addEventListener("error", (event) => {
 
 function finishRun(): void {
   solving = false;
+  answerSection.setAttribute("aria-busy", "false");
   form.classList.remove("solving");
   answerSection.classList.remove("reasoning", "writing");
   prompt.disabled = !modelReady;
@@ -398,22 +404,23 @@ function resetOutput(): void {
   workTarget = "";
   workWritten = "";
   workComplete = false;
+  workTextNode = null;
+  finalRenderedSource = "";
   answerSection.classList.add("waiting");
   answerSection.classList.remove("has-answer", "reasoning", "writing");
   workCopy.replaceChildren();
   finalCopy.replaceChildren();
+  resetFollowScroller(answerScroller);
   gsap.set([workCopy, finalCopy], { clearProps: "opacity,transform" });
-  result.scrollTop = 0;
   if (artState) {
     Flip.from(artState, {
-      absolute: true,
       duration: 0.56,
       ease: "power4.inOut",
     });
   }
 }
 
-function renderOutput(rawText: string): OutputPhase {
+function renderOutput(rawText: string, complete: boolean): OutputPhase {
   const output = splitOutput(rawText);
 
   if (output.reasoning.trim()) {
@@ -427,7 +434,7 @@ function renderOutput(rawText: string): OutputPhase {
 
   flushWorkText(output.reasoning);
   revealAnswerLayout();
-  const rendered = renderAnswerMath(output.answer);
+  const rendered = renderAnswerMath(output.answer, complete);
   if (rendered && !finalRevealed) {
     finalRevealed = true;
     animateFinalIn();
@@ -443,7 +450,6 @@ function revealAnswerLayout(): void {
   answerSection.classList.add("has-answer");
   if (artState) {
     Flip.from(artState, {
-      absolute: true,
       duration: 0.68,
       ease: "power4.inOut",
     });
@@ -454,7 +460,9 @@ function queueWorkText(value: string, complete: boolean): void {
   const text = cleanWorkText(value);
   if (!text.startsWith(workWritten)) {
     workWritten = "";
+    workTextNode = null;
     workCopy.replaceChildren();
+    resetFollowScroller(answerScroller);
   }
   workTarget = text;
   workComplete = complete;
@@ -473,7 +481,7 @@ function writeNextWorkWord(): void {
 
   const firstWord = workWritten.length === 0;
   workWritten += next;
-  workCopy.textContent = workWritten;
+  appendWorkText(next);
   if (firstWord && !reduceMotion) {
     gsap.fromTo(
       workCopy,
@@ -481,7 +489,7 @@ function writeNextWorkWord(): void {
       { opacity: 1, y: 0, duration: 0.28, ease: "power3.out" },
     );
   }
-  scrollToLatest();
+  followLatest(answerScroller);
 
   if (workWritten !== workTarget) {
     const pause = /[.!?;:]\s*$/.test(next) ? 72 : 34;
@@ -492,10 +500,25 @@ function writeNextWorkWord(): void {
 function flushWorkText(value: string): void {
   stopWorkWriter();
   workTarget = cleanWorkText(value);
+  if (workTarget.startsWith(workWritten)) {
+    appendWorkText(workTarget.slice(workWritten.length));
+  } else {
+    workCopy.replaceChildren();
+    workTextNode = null;
+    appendWorkText(workTarget);
+  }
   workWritten = workTarget;
   workComplete = true;
-  workCopy.textContent = workWritten;
-  scrollToLatest();
+  followLatest(answerScroller);
+}
+
+function appendWorkText(value: string): void {
+  if (!value) return;
+  if (!workTextNode?.isConnected) {
+    workTextNode = document.createTextNode("");
+    workCopy.append(workTextNode);
+  }
+  workTextNode.appendData(value);
 }
 
 function stopWorkWriter(): void {
@@ -504,7 +527,7 @@ function stopWorkWriter(): void {
 }
 
 function cleanWorkText(value: string): string {
-  return value.trimStart().replace(/\n{3,}/g, "\n\n");
+  return value.trimStart().replace(/\s+/g, " ");
 }
 
 function splitOutput(rawText: string): {
@@ -535,39 +558,57 @@ function splitOutput(rawText: string): {
   };
 }
 
-function renderAnswerMath(rawText: string): boolean {
-  finalCopy.replaceChildren();
-  const text = stableMathPrefix(rawText)
-    .replace(/\*\*(.*?)\*\*/gs, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
+function renderAnswerMath(rawText: string, complete: boolean): boolean {
+  const text = stableMarkdownPrefix(stableMathPrefix(rawText, complete), complete)
+    .replace(/\*\*/g, "")
+    .replace(/^#{1,6}\s?/gm, "")
     .replace(/\n{3,}/g, "\n\n");
-  const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$)/g;
+
+  if (!text.startsWith(finalRenderedSource)) {
+    finalCopy.replaceChildren();
+    finalRenderedSource = "";
+  }
+
+  appendAnswerFragment(text.slice(finalRenderedSource.length));
+  finalRenderedSource = text;
+  followLatest(answerScroller);
+  return text.trim().length > 0;
+}
+
+function appendAnswerFragment(value: string): void {
+  if (!value) return;
   let cursor = 0;
-  for (const match of text.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    finalCopy.append(document.createTextNode(text.slice(cursor, index)));
-    const raw = match[0];
-    const display = raw.startsWith("$$") || raw.startsWith("\\[");
-    const tex = raw.slice(
-      display ? 2 : raw.startsWith("\\(") ? 2 : 1,
-      display ? -2 : raw.startsWith("\\(") ? -2 : -1,
-    );
-    const node = document.createElement(display ? "div" : "span");
-    katex.render(tex, node, {
-      displayMode: display,
+  while (cursor < value.length) {
+    const span = findNextMathSpan(value, cursor);
+    if (!span) {
+      appendFinalText(value.slice(cursor));
+      return;
+    }
+    appendFinalText(value.slice(cursor, span.start));
+    const node = document.createElement("span");
+    katex.render(span.tex, node, {
+      displayMode: false,
       throwOnError: false,
       strict: false,
     });
     finalCopy.append(node);
-    cursor = index + raw.length;
+    cursor = span.end;
   }
-  finalCopy.append(document.createTextNode(text.slice(cursor)));
-  scrollToLatest();
-  return text.trim().length > 0;
+}
+
+function appendFinalText(value: string): void {
+  if (!value) return;
+  const tail = finalCopy.lastChild;
+  if (tail?.nodeType === Node.TEXT_NODE) {
+    (tail as Text).appendData(value);
+  } else {
+    finalCopy.append(document.createTextNode(value));
+  }
 }
 
 function showAnswerMessage(message: string): void {
   finalCopy.replaceChildren(document.createTextNode(message));
+  finalRenderedSource = message;
   if (!finalRevealed) {
     finalRevealed = true;
     animateFinalIn();
@@ -583,22 +624,235 @@ function animateFinalIn(): void {
   );
 }
 
-function scrollToLatest(): void {
-  const distance = result.scrollHeight - result.scrollTop - result.clientHeight;
-  if (distance < 96) result.scrollTop = result.scrollHeight;
+function stableMathPrefix(text: string, complete: boolean): string {
+  let cursor = 0;
+  while (cursor < text.length) {
+    const delimiter = mathDelimiterAt(text, cursor);
+    if (!delimiter) {
+      cursor += 1;
+      continue;
+    }
+
+    const close = findUnescaped(text, delimiter.close, cursor + delimiter.open.length);
+    if (close < 0) {
+      return complete ? text : text.slice(0, cursor).replace(/\s+$/, "");
+    }
+    cursor = close + delimiter.close.length;
+  }
+  if (!complete && text.endsWith("\\") && !isEscaped(text, text.length - 1)) {
+    return text.slice(0, -1).replace(/\s+$/, "");
+  }
+  return complete ? text : text.replace(/\s+$/, "");
 }
 
-function stableMathPrefix(text: string): string {
-  let end = text.length;
-  const displayOpen = text.lastIndexOf("\\[");
-  const displayClose = text.lastIndexOf("\\]");
-  if (displayOpen > displayClose) end = Math.min(end, displayOpen);
+function stableMarkdownPrefix(text: string, complete: boolean): string {
+  if (complete) return text;
+  const stars = text.match(/\*+$/)?.[0];
+  return stars && stars.length % 2 === 1 ? text.slice(0, -1) : text;
+}
 
-  const doubleDollars = text.match(/\$\$/g)?.length ?? 0;
-  if (doubleDollars % 2 === 1) end = Math.min(end, text.lastIndexOf("$$"));
-  return text.slice(0, end);
+type MathSpan = {
+  start: number;
+  end: number;
+  tex: string;
+};
+
+type MathDelimiter = {
+  open: string;
+  close: string;
+};
+
+function mathDelimiterAt(text: string, index: number): MathDelimiter | null {
+  if (isEscaped(text, index)) return null;
+  if (text.startsWith("\\[", index)) {
+    return { open: "\\[", close: "\\]" };
+  }
+  if (text.startsWith("\\(", index)) {
+    return { open: "\\(", close: "\\)" };
+  }
+  if (text[index] === "$") {
+    return text.startsWith("$$", index)
+      ? { open: "$$", close: "$$" }
+      : { open: "$", close: "$" };
+  }
+  return null;
+}
+
+function findNextMathSpan(text: string, from: number): MathSpan | null {
+  for (let cursor = from; cursor < text.length; cursor++) {
+    const delimiter = mathDelimiterAt(text, cursor);
+    if (!delimiter) continue;
+    const close = findUnescaped(text, delimiter.close, cursor + delimiter.open.length);
+    if (close < 0) return null;
+    return {
+      start: cursor,
+      end: close + delimiter.close.length,
+      tex: text.slice(cursor + delimiter.open.length, close),
+    };
+  }
+  return null;
+}
+
+function findUnescaped(text: string, value: string, from: number): number {
+  let cursor = from;
+  while (cursor < text.length) {
+    const index = text.indexOf(value, cursor);
+    if (index < 0) return -1;
+    if (!isEscaped(text, index)) return index;
+    cursor = index + value.length;
+  }
+  return -1;
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let slashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor--) {
+    slashes += 1;
+  }
+  return slashes % 2 === 1;
+}
+
+type FollowScroller = {
+  element: HTMLElement;
+  following: boolean;
+  automatic: boolean;
+  frame: number | null;
+  tween: gsap.core.Tween | null;
+  lastHeight: number;
+};
+
+function createFollowScroller(element: HTMLElement): FollowScroller {
+  const scroller: FollowScroller = {
+    element,
+    following: true,
+    automatic: false,
+    frame: null,
+    tween: null,
+    lastHeight: element.scrollHeight,
+  };
+
+  const release = () => {
+    if (scroller.frame !== null) cancelAnimationFrame(scroller.frame);
+    scroller.tween?.kill();
+    scroller.frame = null;
+    scroller.tween = null;
+    scroller.automatic = false;
+    scroller.following = false;
+  };
+
+  const releaseAndCheckEnd = () => {
+    release();
+    scroller.frame = requestAnimationFrame(() => {
+      scroller.frame = null;
+      scroller.following = distanceFromEnd(element) <= 2;
+    });
+  };
+
+  element.addEventListener(
+    "wheel",
+    (event) => {
+      if (event.deltaY >= 0) releaseAndCheckEnd();
+      else release();
+    },
+    { passive: true },
+  );
+  element.addEventListener("touchstart", release, { passive: true });
+  element.addEventListener("pointerdown", release, { passive: true });
+  element.addEventListener(
+    "pointerup",
+    () => {
+      scroller.following = distanceFromEnd(element) <= 2;
+    },
+    { passive: true },
+  );
+  element.addEventListener("keydown", (event) => {
+    if (event.key === "End") {
+      event.preventDefault();
+      release();
+      scroller.automatic = true;
+      scroller.element.scrollTop = scroller.element.scrollHeight;
+      scroller.frame = requestAnimationFrame(() => {
+        scroller.frame = null;
+        scroller.automatic = false;
+        scroller.following = true;
+      });
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      release();
+      scroller.element.scrollTop = 0;
+      return;
+    }
+    if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
+      releaseAndCheckEnd();
+      return;
+    }
+    if (["ArrowUp", "PageUp"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+      release();
+    }
+  });
+  element.addEventListener(
+    "scroll",
+    () => {
+      if (!scroller.automatic) {
+        scroller.following = distanceFromEnd(element) <= 2;
+      }
+    },
+    { passive: true },
+  );
+  return scroller;
+}
+
+function resetFollowScroller(scroller: FollowScroller): void {
+  if (scroller.frame !== null) cancelAnimationFrame(scroller.frame);
+  scroller.tween?.kill();
+  scroller.frame = null;
+  scroller.tween = null;
+  scroller.following = true;
+  scroller.automatic = false;
+  scroller.element.scrollTop = 0;
+  scroller.lastHeight = scroller.element.scrollHeight;
+}
+
+function followLatest(scroller: FollowScroller): void {
+  if (!scroller.following || scroller.frame !== null) return;
+  scroller.frame = requestAnimationFrame(() => {
+    scroller.frame = null;
+    if (!scroller.following) return;
+    const height = scroller.element.scrollHeight;
+    if (height === scroller.lastHeight) return;
+    scroller.lastHeight = height;
+    const target = Math.max(0, height - scroller.element.clientHeight);
+    if (target <= scroller.element.scrollTop + 1) return;
+
+    scroller.tween?.kill();
+    scroller.automatic = true;
+    if (reduceMotion) {
+      scroller.element.scrollTop = target;
+      scroller.automatic = false;
+      return;
+    }
+
+    scroller.tween = gsap.to(scroller.element, {
+      scrollTop: target,
+      duration: 0.28,
+      ease: "power3.out",
+      overwrite: true,
+      onComplete: () => {
+        scroller.tween = null;
+        scroller.automatic = false;
+        scroller.following = distanceFromEnd(scroller.element) <= 2;
+      },
+    });
+  });
+}
+
+function distanceFromEnd(element: HTMLElement): number {
+  return element.scrollHeight - element.scrollTop - element.clientHeight;
 }
 
 function setStatus(value: string): void {
+  if (status.textContent === value) return;
   status.textContent = value;
 }

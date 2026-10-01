@@ -18,7 +18,7 @@ Make Violetto Limite 1B usable as a private, browser-only mathematics playground
 - Sampling: specialized WGSL hierarchical top-k plus temperature/top-p selection, with CPU verification and fallback
 - Vocabulary head: shape-specific WGSL projection that keeps only each workgroup's top 50 logits; four live tokens are checked against JAX.js before it is selected
 - Decode layout: fused QKV/gate-up/gate projections, shared RoPE factors, and packed KV tensors
-- Streaming: incremental UTF-8 token decoding and 250 ms UI render batches
+- Streaming: incremental UTF-8 token decoding, append-only rich text, and user-aware follow scrolling
 
 The deployed reference implementation has completed end-to-end browser inference and solved `x + 3 = 8` correctly. It has no backend.
 
@@ -51,9 +51,8 @@ JAX.js was chosen because it made an exact custom architecture possible quickly.
 2. Decode crosses the JavaScript/GPU boundary layer by layer.
 3. Packed KV-cache updates still touch capacity-sized tensors instead of updating one slot efficiently.
 4. Sampling still requires a four-byte GPU readback and queue synchronization for every token.
-5. The throttled answer and KaTeX still rebuild rendered output during generation.
-6. A small prompt can still spend hundreds of tokens in hidden reasoning before producing its answer.
-7. The query parameters `?seed=1`, `?head=jax`, and `?head=wgsl` provide deterministic A/B controls, but there is not yet a multi-prompt benchmark suite.
+5. A small prompt can still spend hundreds of tokens in hidden reasoning before producing its answer.
+6. The query parameters `?seed=1`, `?head=jax`, and `?head=wgsl` provide deterministic A/B controls, but there is not yet a multi-prompt benchmark suite.
 
 ## Optimization sequence
 

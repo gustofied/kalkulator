@@ -30,11 +30,11 @@
             spellcheck="false"
             autocomplete="off"
             aria-describedby="hint"
-            placeholder="write a problem"
+            placeholder="write a math problem"
             disabled
             required
           />
-          <button id="run" type="submit" disabled>ask</button>
+          <button id="run" type="submit" disabled>solve</button>
         </div>
         <small id="hint" class="visually-hidden">The model is kept on this machine after its first use.</small>
         <span id="status" class="visually-hidden" aria-live="polite" aria-atomic="true">idle</span>
@@ -43,15 +43,13 @@
 
       <article id="result" aria-label="Violetto answer">
         <section id="answer-section" class="answer-section waiting">
-          <div id="answer" class="answer">
+          <div id="answer" class="answer" aria-label="Generated solution" tabindex="0">
             <figure id="answer-art" class="answer-art" aria-hidden="true">
               <img class="answer-art-ghost" src="./gothic-k-scholar.png" alt="" />
               <img class="answer-art-ink" src="./gothic-k-scholar.png" alt="" />
             </figure>
-            <div id="answer-copy" class="answer-copy">
-              <div id="work-copy" class="work-copy"></div>
-              <div id="final-copy" class="final-copy" aria-live="polite"></div>
-            </div>
+            <div id="work-copy" class="work-copy"></div>
+            <div id="final-copy" class="final-copy"></div>
           </div>
         </section>
       </article>

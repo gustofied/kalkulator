@@ -61,7 +61,7 @@ button, input { font: inherit; }
 main {
   position: relative;
   z-index: 1;
-  width: min(52rem, calc(100% - 48px));
+  width: min(40rem, calc(100% - 48px));
   height: 100dvh;
   margin: 0 auto;
   padding: 40px 0 0;
@@ -148,11 +148,8 @@ input:focus-visible { outline: 0; }
 
 #result {
   min-height: 0;
-  padding: 32px 0 64px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-color: rgb(24 24 24 / 20%) transparent;
-  scrollbar-width: thin;
+  padding: 24px 0 40px;
+  overflow: hidden;
 }
 
 .answer-section { min-height: 100%; }
@@ -163,11 +160,48 @@ input:focus-visible { outline: 0; }
   min-width: 0;
   white-space: normal;
   color: var(--ink);
-  font-size: 18px;
-  line-height: 28px;
+  font-size: 14px;
+  line-height: 20px;
   font-weight: 400;
   letter-spacing: -0.01em;
-  text-wrap: pretty;
+  text-wrap: wrap;
+}
+
+.answer-section.has-answer .answer {
+  max-height: min(16rem, calc(100dvh - 120px));
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+
+.answer-section.has-answer .answer::-webkit-scrollbar { width: 2px; }
+.answer-section.has-answer .answer::-webkit-scrollbar-track { background: transparent; }
+.answer-section.has-answer .answer::-webkit-scrollbar-thumb { background: transparent; }
+
+.answer:focus-visible {
+  outline: 0;
+}
+
+.answer-section.has-answer .answer:focus-visible {
+  box-shadow: -2px 0 0 rgb(75 54 95 / 32%);
+  scrollbar-color: rgb(24 24 24 / 12%) transparent;
+}
+
+.answer-section.has-answer .answer:focus-visible::-webkit-scrollbar-thumb {
+  background: rgb(24 24 24 / 12%);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .answer-section.has-answer .answer:hover {
+    scrollbar-color: rgb(24 24 24 / 12%) transparent;
+  }
+
+  .answer-section.has-answer .answer:hover::-webkit-scrollbar-thumb {
+    background: rgb(24 24 24 / 12%);
+  }
 }
 
 .answer::after {
@@ -178,9 +212,9 @@ input:focus-visible { outline: 0; }
 
 .answer-art {
   position: relative;
-  width: 184px;
+  width: 144px;
   aspect-ratio: 1;
-  margin: 1px 24px 12px 0;
+  margin: 1px 16px 8px 0;
   float: left;
   line-height: 0;
   will-change: transform, opacity;
@@ -223,29 +257,31 @@ input:focus-visible { outline: 0; }
   will-change: opacity;
 }
 
-.answer-copy {
-  min-width: 0;
-}
-
 .work-copy,
-.final-copy { white-space: pre-wrap; }
+.final-copy { white-space: normal; }
 
 .work-copy {
-  color: rgb(24 24 24 / 52%);
-  font-size: 16px;
-  line-height: 24px;
+  color: rgb(24 24 24 / 70%);
+  font-size: 12px;
+  line-height: 16px;
   letter-spacing: 0;
 }
 
 .work-copy:empty,
 .final-copy:empty { display: none; }
 
-.work-copy:not(:empty) + .final-copy:not(:empty) { margin-top: 24px; }
+.final-copy {
+  clear: both;
+  overflow-anchor: none;
+}
+
+.work-copy:not(:empty) + .final-copy:not(:empty) { margin-top: 12px; }
 
 .answer-section.waiting .answer {
   height: 100%;
   display: grid;
   place-items: center;
+  overflow: visible;
 }
 
 .answer-section.waiting .answer-art {
@@ -254,7 +290,8 @@ input:focus-visible { outline: 0; }
   float: none;
 }
 
-.answer-section.waiting .answer-copy { display: none; }
+.answer-section.waiting .work-copy,
+.answer-section.waiting .final-copy { display: none; }
 .answer-section.waiting .answer::after { display: none; }
 
 .answer-section.reasoning .work-copy::after,
@@ -270,7 +307,7 @@ input:focus-visible { outline: 0; }
 }
 
 .katex-display {
-  margin: 24px 0;
+  margin: 16px 0;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -288,17 +325,14 @@ input:focus-visible { outline: 0; }
 
   .prompt-line { gap: 16px; }
 
-  .answer {
-    font-size: 16px;
-    line-height: 24px;
-  }
+  .answer { font-size: 14px; line-height: 20px; }
 
   .work-copy {
-    font-size: 15px;
-    line-height: 22px;
+    font-size: 12px;
+    line-height: 16px;
   }
 
-  #result { padding: 24px 0 48px; }
+  #result { padding: 16px 0; }
 
   .answer-art {
     width: 128px;
@@ -307,6 +341,10 @@ input:focus-visible { outline: 0; }
   }
 
   .answer-section.waiting .answer-art { width: 128px; }
+}
+
+@media (max-width: 360px) {
+  .answer-section.has-answer .answer-art { width: 96px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
