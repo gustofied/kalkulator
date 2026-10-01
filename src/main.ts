@@ -102,6 +102,8 @@ form.addEventListener("submit", (event) => {
   form.classList.add("solving");
   prompt.disabled = true;
   run.disabled = true;
+  preparationStage = "";
+  preparationProgressBucket = -1;
   resetOutput();
   startWorkingMotion();
   worker.postMessage({ type: "solve", problem });
