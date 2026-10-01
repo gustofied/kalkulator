@@ -178,7 +178,10 @@ input:focus-visible { outline: 0; }
   align-items: start;
 }
 
-.answer-copy { min-width: 0; }
+.answer-copy {
+  min-width: 0;
+  padding-top: 4px;
+}
 
 .copy-flow {
   min-width: 0;
