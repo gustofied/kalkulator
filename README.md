@@ -7,7 +7,7 @@
 ## Browser requirements
 
 - A current browser with WebGPU support
-- Enough memory and site storage for the 556 MiB model artifact
+- Enough memory and site storage for the 1.93 GiB model artifact
 
 ## Local setup
 

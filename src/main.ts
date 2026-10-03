@@ -3,41 +3,15 @@ import { gsap } from "gsap";
 import { Flip } from "gsap/Flip";
 import katex from "katex";
 
+import { findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
+import {
+  type CompletionReason,
+  type InferenceRequest,
+  type InferenceResponse,
+} from "./inference-protocol";
 import "./style.css";
 
 gsap.registerPlugin(Flip);
-
-type WorkerMessage =
-  | { type: "status"; status: string; progress?: number }
-  | {
-      type: "ready";
-      timings: {
-        deviceMs?: number;
-        tokenizerReadMs?: number;
-        tokenizerParseMs?: number;
-        artifactMs?: number;
-        pipelineMs?: number;
-      };
-    }
-  | {
-      type: "update";
-      text: string;
-      tokens: number;
-      speed: number;
-    }
-  | {
-      type: "done";
-      text: string;
-      tokens: number;
-      speed: number;
-      reason: "complete" | "limit";
-      timings: {
-        prefillMs?: number;
-        firstTokenMs?: number;
-        totalMs?: number;
-      };
-    }
-  | { type: "error"; message: string };
 
 const form = document.querySelector<HTMLFormElement>("#prompt-form")!;
 const skipLink = document.querySelector<HTMLAnchorElement>(".skip-link")!;
@@ -73,6 +47,9 @@ const worker = new Worker(new URL("./inference.worker.ts", import.meta.url), {
 });
 
 let solving = false;
+let nextRunId = 1;
+let activeRunId: number | null = null;
+let activeRawText = "";
 let finalRevealed = false;
 let modelReady = false;
 let introTimeline: gsap.core.Timeline | null = null;
@@ -85,31 +62,73 @@ let workTextNode: Text | null = null;
 let finalRenderedSource = "";
 let preparationStage = "";
 let preparationProgressBucket = -1;
+let generationProgressBucket = -1;
+let preservedPastedProblem: { readonly raw: string; readonly display: string } | null = null;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const answerScroller = createFollowScroller(copyFlow);
 console.info("[Kalkulator] preparing Violetto and WebGPU");
 startPreparationIntro();
-worker.postMessage({ type: "prepare" });
+postWorkerMessage({ type: "prepare" });
+
+prompt.addEventListener("paste", (event) => {
+  const pasted = event.clipboardData?.getData("text");
+  if (!pasted || !/[\r\n]/.test(pasted)) return;
+
+  event.preventDefault();
+  const start = prompt.selectionStart ?? prompt.value.length;
+  const end = prompt.selectionEnd ?? start;
+  const display = pasted.replace(/\s+/g, " ").trim();
+  const replacesWholePrompt = start === 0 && end === prompt.value.length;
+  prompt.setRangeText(display, start, end, "end");
+  preservedPastedProblem = replacesWholePrompt
+    ? { raw: pasted.trim(), display: prompt.value.trim() }
+    : null;
+});
+
+prompt.addEventListener("input", () => {
+  if (preservedPastedProblem?.display !== prompt.value.trim()) {
+    preservedPastedProblem = null;
+  }
+});
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!modelReady || solving) return;
 
-  const problem = prompt.value.trim();
-  if (!problem) return;
+  const displayedProblem = prompt.value.trim();
+  if (!displayedProblem) return;
+  const problem =
+    preservedPastedProblem?.display === displayedProblem
+      ? preservedPastedProblem.raw
+      : displayedProblem;
+  const runId = nextRunId++;
   solving = true;
+  activeRunId = runId;
+  activeRawText = "";
   answerSection.setAttribute("aria-busy", "true");
   form.classList.add("solving");
   prompt.disabled = true;
   run.disabled = true;
   preparationStage = "";
   preparationProgressBucket = -1;
+  generationProgressBucket = -1;
   resetOutput();
   startWorkingMotion();
-  worker.postMessage({ type: "solve", problem });
+  const request: InferenceRequest = {
+    type: "solve",
+    runId,
+    problem,
+  };
+  postWorkerMessage(request);
 });
 
-worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
+window.addEventListener("pagehide", () => {
+  if (activeRunId !== null) {
+    postWorkerMessage({ type: "cancel", runId: activeRunId });
+  }
+});
+
+worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
   const message = event.data;
   if (message.type === "ready") {
     modelReady = true;
@@ -121,6 +140,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   }
 
   if (message.type === "status") {
+    if (message.runId !== undefined && message.runId !== activeRunId) return;
     logPreparation(message.status, message.progress);
     if (!modelReady) return;
     setStatus(message.status);
@@ -133,41 +153,52 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   }
 
   if (message.type === "update") {
-    const phase = renderOutput(message.text, false);
+    if (message.runId !== activeRunId) return;
+    logGeneration(message.tokens, message.speed);
+    activeRawText += message.delta;
+    const phase = renderOutput(activeRawText, false);
     setOutputPhase(phase);
     return;
   }
 
   if (message.type === "done") {
-    const phase = renderOutput(message.text, true);
-    if (phase !== "answer") {
+    if (message.runId !== activeRunId) return;
+    activeRawText = message.text;
+    renderOutput(message.text, true);
+    const hasBoxedAnswer = message.reason === "boxed";
+    if (!hasBoxedAnswer) {
       revealAnswerLayout();
-      showAnswerMessage(
-        message.reason === "limit"
-          ? "Violetto did not reach a final answer. Try a shorter mathematics problem."
-          : "No final answer.",
-      );
+      showAnswerMessage(failureMessage(message.reason));
     }
     answerSection.classList.remove("reasoning", "writing");
-    const finalStatus = message.reason === "limit" ? "no answer" : "answer complete";
+    const finalStatus = hasBoxedAnswer ? "answer complete" : "no answer";
     setStatus(finalStatus);
-    hint.textContent =
-      message.reason === "limit"
-        ? "Try a shorter mathematics problem."
-        : message.timings.prefillMs
-          ? `Prefill ${(message.timings.prefillMs / 1000).toFixed(1)}s`
-          : "Ready for another problem.";
-    const summary = {
+    hint.textContent = completionHint(message.reason, message.timings.prefillMs);
+    const metrics = {
       tokens: message.tokens,
       tokensPerSecond: Number(message.speed.toFixed(2)),
-      reason: message.reason,
+      samplerSeed: message.samplerSeed,
       ...message.timings,
     };
+    const summary = { runId: message.runId, reason: message.reason, ...metrics };
     console.info(`[Kalkulator] generation complete ${JSON.stringify(summary)}`);
-    finishRun();
+    finishRun(message.runId);
     return;
   }
 
+  if (message.type === "rejected") {
+    if (message.runId !== activeRunId) return;
+    console.error("[Kalkulator] inference request rejected", message.message);
+    stopWorkingMotion();
+    revealAnswerLayout();
+    showAnswerMessage(message.message);
+    setStatus("error");
+    hint.textContent = "Try again.";
+    finishRun(message.runId);
+    return;
+  }
+
+  if (message.runId !== undefined && message.runId !== activeRunId) return;
   console.error("[Kalkulator] preparation or inference failed", message.message);
   stopPreparationIntro();
   stopWorkingMotion();
@@ -176,7 +207,7 @@ worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
   showAnswerMessage(message.message);
   setStatus("error");
   hint.textContent = "Try again or reload the page.";
-  finishRun();
+  finishRun(message.runId);
 });
 
 worker.addEventListener("error", (event) => {
@@ -186,16 +217,54 @@ worker.addEventListener("error", (event) => {
   revealAnswerLayout();
   showAnswerMessage(event.message || "Inference worker failed.");
   setStatus("error");
-  finishRun();
+  finishRun(activeRunId ?? undefined);
 });
 
-function finishRun(): void {
+function finishRun(runId?: number): void {
+  if (runId !== undefined && activeRunId !== runId) return;
   solving = false;
+  activeRunId = null;
+  activeRawText = "";
   answerSection.setAttribute("aria-busy", "false");
   form.classList.remove("solving");
   answerSection.classList.remove("reasoning", "writing");
   prompt.disabled = !modelReady;
   run.disabled = !modelReady;
+}
+
+function failureMessage(reason: CompletionReason): string {
+  switch (reason) {
+    case "limit":
+      return "Violetto did not return a boxed final answer.";
+    case "eos":
+      return "Violetto stopped before returning a boxed final answer.";
+    case "cancelled":
+      return "The calculation was cancelled.";
+    case "boxed":
+      return "";
+  }
+}
+
+function completionHint(
+  reason: CompletionReason,
+  prefillMs: number | undefined,
+): string {
+  switch (reason) {
+    case "limit":
+      return "No boxed answer";
+    case "eos":
+      return "Stopped before boxed answer";
+    case "cancelled":
+      return "Cancelled";
+    case "boxed":
+      return prefillMs
+        ? `Prefill ${(prefillMs / 1000).toFixed(1)}s`
+        : "Ready for another problem.";
+  }
+}
+
+function postWorkerMessage(message: InferenceRequest): void {
+  worker.postMessage(message);
 }
 
 type OutputPhase = "waiting" | "reasoning" | "answer";
@@ -221,6 +290,15 @@ function logPreparation(value: string, progress?: number): void {
   preparationStage = stage;
   preparationProgressBucket = -1;
   console.info(`[Kalkulator] ${value}`);
+}
+
+function logGeneration(tokens: number, speed: number): void {
+  const bucket = Math.floor(tokens / 256);
+  if (bucket === generationProgressBucket) return;
+  generationProgressBucket = bucket;
+  console.info(
+    `[Kalkulator] generating · ${tokens} tok · ${speed.toFixed(2)} tok/s`,
+  );
 }
 
 function startPreparationIntro(): void {
@@ -398,7 +476,11 @@ function renderOutput(rawText: string, complete: boolean): OutputPhase {
 
   if (output.reasoning.trim()) {
     revealAnswerLayout();
-    queueWorkText(output.reasoning, !output.thinking);
+    if (complete) {
+      flushWorkText(output.reasoning);
+    } else {
+      queueWorkText(output.reasoning, !output.thinking);
+    }
   }
 
   if (!output.answer.trim()) {
@@ -516,12 +598,27 @@ function splitOutput(rawText: string): {
   }
 
   const start = rawText.indexOf("<think>");
-  if (start < 0) return { reasoning: "", answer: rawText, thinking: false };
+  if (start < 0) {
+    const box = findLastBoxedAnswer(rawText);
+    if (box && hasCompleteFinalBox(rawText)) {
+      const boxedExpression = rawText.slice(box.commandStart, box.closeBrace + 1);
+      const reasoning = rawText
+        .slice(0, box.commandStart)
+        .replace(/(?:\\\[|\\\(|\$\$?)\s*$/, "");
+      return {
+        reasoning,
+        answer: `\\(${boxedExpression}\\)`,
+        thinking: false,
+      };
+    }
+    return { reasoning: rawText, answer: "", thinking: true };
+  }
   const contentStart = start + "<think>".length;
   const end = rawText.indexOf("</think>", contentStart);
   if (end < 0) {
+    const openThinking = rawText.slice(contentStart);
     return {
-      reasoning: rawText.slice(contentStart).replace(/<\/?think[^>]*$/, ""),
+      reasoning: openThinking.replace(/<\/?think[^>]*$/, ""),
       answer: "",
       thinking: true,
     };
@@ -601,6 +698,16 @@ function animateFinalIn(): void {
 function stableMathPrefix(text: string, complete: boolean): string {
   let cursor = 0;
   while (cursor < text.length) {
+    const environment = mathEnvironmentAt(text, cursor);
+    if (environment) {
+      const close = findUnescaped(text, environment.close, environment.contentStart);
+      if (close < 0) {
+        return complete ? text : text.slice(0, cursor).replace(/\s+$/, "");
+      }
+      cursor = close + environment.close.length;
+      continue;
+    }
+
     const delimiter = mathDelimiterAt(text, cursor);
     if (!delimiter) {
       cursor += 1;
@@ -636,6 +743,21 @@ type MathDelimiter = {
   close: string;
 };
 
+type MathEnvironment = {
+  contentStart: number;
+  close: string;
+};
+
+function mathEnvironmentAt(text: string, index: number): MathEnvironment | null {
+  if (isEscaped(text, index) || !text.startsWith("\\begin{", index)) return null;
+  const match = /^\\begin\{([A-Za-z]+\*?)\}/.exec(text.slice(index));
+  if (!match) return null;
+  return {
+    contentStart: index + match[0].length,
+    close: `\\end{${match[1]}}`,
+  };
+}
+
 function mathDelimiterAt(text: string, index: number): MathDelimiter | null {
   if (isEscaped(text, index)) return null;
   if (text.startsWith("\\[", index)) {
@@ -654,6 +776,18 @@ function mathDelimiterAt(text: string, index: number): MathDelimiter | null {
 
 function findNextMathSpan(text: string, from: number): MathSpan | null {
   for (let cursor = from; cursor < text.length; cursor++) {
+    const environment = mathEnvironmentAt(text, cursor);
+    if (environment) {
+      const close = findUnescaped(text, environment.close, environment.contentStart);
+      if (close < 0) return null;
+      const end = close + environment.close.length;
+      return {
+        start: cursor,
+        end,
+        tex: text.slice(cursor, end),
+      };
+    }
+
     const delimiter = mathDelimiterAt(text, cursor);
     if (!delimiter) continue;
     const close = findUnescaped(text, delimiter.close, cursor + delimiter.open.length);
