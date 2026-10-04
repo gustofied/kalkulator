@@ -537,7 +537,8 @@ function layerInputs(
 }
 
 export function logitsFromHidden(model: LimiteModel, hidden: np.Array): np.Array {
-  // Sampling applies Violetto's sigmoid soft cap to the full vocabulary.
+  // Violetto's sigmoid softcap is strictly monotonic, so top-k can operate on
+  // raw logits. The sampler applies the softcap to only the 50 survivors.
   return runLinear(model.embedTokens, hidden).astype(np.float32).reshape([C.vocab]);
 }
 

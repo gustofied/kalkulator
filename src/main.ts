@@ -177,7 +177,6 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     const metrics = {
       tokens: message.tokens,
       tokensPerSecond: Number(message.speed.toFixed(2)),
-      samplerSeed: message.samplerSeed,
       ...message.timings,
     };
     const summary = { runId: message.runId, reason: message.reason, ...metrics };

@@ -95,12 +95,11 @@ async function solve(
       throw new Error("That problem is too long for the browser context.");
     }
 
-    const samplerSeed = randomSamplerSeed();
     const outputBudget = LIMITE_CONTEXT_TOKENS - tokens.length;
 
     postStatus(`prefill · ${tokens.length} tok`, undefined, runId);
     const prefillStarted = performance.now();
-    const first = await activeEngine.prefill(tokens, samplerSeed);
+    const first = await activeEngine.prefill(tokens);
     const firstTokenAt = performance.now();
     timings.prefillMs = firstTokenAt - prefillStarted;
     timings.firstTokenMs = firstTokenAt - runStarted;
@@ -125,7 +124,6 @@ async function solve(
       tokens: generation.tokens,
       speed,
       reason: generation.reason,
-      samplerSeed,
       timings,
     });
   } catch (error) {
@@ -297,12 +295,6 @@ function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
   if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MiB`;
   return `${Math.round(bytes / 1024)} KiB`;
-}
-
-function randomSamplerSeed(): number {
-  const words = new Uint32Array(1);
-  do crypto.getRandomValues(words); while (words[0] === 0);
-  return words[0];
 }
 
 export {};

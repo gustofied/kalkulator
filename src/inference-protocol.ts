@@ -42,7 +42,6 @@ export type InferenceResponse =
       readonly tokens: number;
       readonly speed: number;
       readonly reason: CompletionReason;
-      readonly samplerSeed: number;
       readonly timings: RunTimings;
     }
   | { readonly type: "rejected"; readonly runId: number; readonly message: string }

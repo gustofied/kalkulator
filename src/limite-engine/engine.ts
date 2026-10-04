@@ -1,16 +1,14 @@
 import {
-  loadLimiteFullBf16Artifact,
+  loadLimiteQ4Artifact,
   type LimiteArtifactProgressCallback,
-  type LimiteBodyPackedBf16TensorManifest,
-  type LimiteEmbeddingPackedBf16TensorManifest,
-  type LimitePackedBf16TensorManifest,
-  type LoadedLimiteFullBf16Artifact,
+  type LoadedLimiteQ4Artifact,
+  type LimiteQ4TensorManifest,
 } from "./artifact";
 import {
   ATTENTION_PARTIAL_STRIDE,
   ATTENTION_PARTITION_KEYS,
   ELEMENTWISE_WORKGROUP_SIZE,
-  GPU_TOP_P_SAMPLER_WGSL,
+  GPU_TOP_K_TOP_P_SAMPLER_WGSL,
   GQA_ATTENTION_WGSL,
   LIMITE_HEAD_DIM,
   LIMITE_HIDDEN_SIZE,
@@ -19,11 +17,11 @@ import {
   LIMITE_LOCAL_KEY_COUNT,
   LIMITE_QUERY_HEADS,
   LIMITE_RMS_EPSILON,
-  LIMITE_PADDED_VOCAB_SIZE,
-  LIMITE_TOKENIZER_VOCAB_SIZE,
-  PACKED_BF16_EMBEDDING_WGSL,
+  LIMITE_VOCAB_SIZE,
+  Q4_32_EMBEDDING_WGSL,
+  Q4_32_EMBED_WORKGROUP_SIZE,
   QKV_POSTPROCESS_WGSL,
-  SAMPLER_ENTRIES_PER_PARTITION,
+  SAMPLER_CANDIDATES_PER_PARTITION,
   SAMPLER_WORKGROUP_SIZE,
   SWIGLU_WGSL,
 } from "./ops";
@@ -34,15 +32,14 @@ import {
   VECTOR_WORKGROUP_SIZE,
 } from "./runtime-shaders";
 import {
-  PACKED_BF16_MATVEC_ROWS_PER_GROUP,
-  PACKED_BF16_MATVEC_WGSL,
+  Q4_32_MATVEC_ROWS_PER_GROUP,
+  Q4_32_MATVEC_WGSL,
   RMS_NORM_F32_WGSL,
 } from "./shaders";
 
-export const LIMITE_CONTEXT_TOKENS = 32_768;
-const PINNED_LIMITE_TOKENIZER_URL =
+export const LIMITE_CONTEXT_TOKENS = 4_096;
+export const LIMITE_TOKENIZER_URL =
   "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/b1f3d572ccacb6919f4d64c321b70ba034ddaef2/tokenizer.json";
-export const LIMITE_TOKENIZER_URL = resolveTokenizerUrl();
 
 const LAYER_COUNT = 48;
 const KV_WIDTH = LIMITE_KV_HEADS * LIMITE_HEAD_DIM;
@@ -51,22 +48,12 @@ const QKV_OUTPUT_SIZE =
 const GLOBAL_LAYERS = new Set(Array.from({ length: 12 }, (_, index) => index * 4 + 3));
 const VALUE_LAYERS = new Set(Array.from({ length: 16 }, (_, index) => index * 3 + 1));
 const MAX_ATTENTION_PARTITIONS = Math.ceil(LIMITE_CONTEXT_TOKENS / ATTENTION_PARTITION_KEYS);
-const SAMPLER_PARTITIONS = Math.ceil(LIMITE_TOKENIZER_VOCAB_SIZE / SAMPLER_WORKGROUP_SIZE);
-const SAMPLER_ENTRIES = SAMPLER_PARTITIONS * SAMPLER_ENTRIES_PER_PARTITION;
+const SAMPLER_PARTITIONS = Math.ceil(LIMITE_VOCAB_SIZE / SAMPLER_WORKGROUP_SIZE);
+const SAMPLER_CANDIDATES = SAMPLER_PARTITIONS * SAMPLER_CANDIDATES_PER_PARTITION;
 const DECODE_BATCH_SIZE = 4;
 const PARAMETER_BLOCK_BYTES = 256;
 const PARAMETER_LAYER_BYTES = PARAMETER_BLOCK_BYTES * 2;
 const PARAMETER_SLOT_BYTES = LAYER_COUNT * PARAMETER_LAYER_BYTES;
-const LIMITE_SAMPLER_SEED = 0x6d2b79f5;
-// CPU-FP32 torch.linspace followed by the checkpoint's power operation. Keeping
-// the exact bits avoids the different rounding produced by JS Math.pow.
-const LIMITE_ROPE_FREQUENCY_BITS = [
-  0x3f800000, 0x3f4cb517, 0x3f23b11d, 0x3f02e4ef, 0x3ed1560c, 0x3ea764a7, 0x3e85da9e,
-  0x3e5611cc, 0x3e2b2d9d, 0x3e08e170, 0x3ddae8f2, 0x3daf0c7b, 0x3d8bf9c6, 0x3d5fdc1d,
-  0x3d3301c2, 0x3d0f2407, 0x3ce4ebee, 0x3cb70def, 0x3c926096, 0x3c6a190a, 0x3c3b3190,
-  0x3c15afe8, 0x3bef641c, 0x3bbf6d21, 0x3b991262, 0x3b74cdd8, 0x3b43c132, 0x3b1c886f,
-  0x3afa56ea, 0x3ac82e56, 0x3aa01286, 0x3a800000,
-] as const;
 
 const STORAGE = GPUBufferUsage.STORAGE;
 const COPY_DST = GPUBufferUsage.COPY_DST;
@@ -77,21 +64,19 @@ export type LimiteEngineTimings = {
   readonly pipelineMs: number;
 };
 
-type MatVecOperation = {
-  readonly pipeline: GPUComputePipeline;
+type Q4Operation = {
   readonly bindGroup: GPUBindGroup;
   readonly rows: number;
-  readonly rowsPerGroup: number;
 };
 
 type LayerRuntime = {
   readonly index: number;
   readonly isGlobal: boolean;
   readonly cacheCapacity: number;
-  readonly qkv: MatVecOperation;
-  readonly output: MatVecOperation;
-  readonly gateUp: MatVecOperation;
-  readonly down: MatVecOperation;
+  readonly qkv: Q4Operation;
+  readonly output: Q4Operation;
+  readonly gateUp: Q4Operation;
+  readonly down: Q4Operation;
   readonly qkvBindGroups: readonly GPUBindGroup[];
   readonly attentionPartitionBindGroups: readonly GPUBindGroup[];
   readonly attentionFinalizeBindGroups: readonly GPUBindGroup[];
@@ -100,9 +85,9 @@ type LayerRuntime = {
 };
 
 type Pipelines = {
-  readonly packedBf16Embedding: GPUComputePipeline;
+  readonly embedding: GPUComputePipeline;
   readonly rms: GPUComputePipeline;
-  readonly packedBf16Matvec: GPUComputePipeline;
+  readonly q4: GPUComputePipeline;
   readonly qkv: GPUComputePipeline;
   readonly attentionPartition: GPUComputePipeline;
   readonly attentionFinalize: GPUComputePipeline;
@@ -110,8 +95,8 @@ type Pipelines = {
   readonly swiglu: GPUComputePipeline;
   readonly copy: GPUComputePipeline;
   readonly mudd: GPUComputePipeline;
-  readonly prepareNucleusPartitions: GPUComputePipeline;
-  readonly sampleNucleus: GPUComputePipeline;
+  readonly samplePartitions: GPUComputePipeline;
+  readonly sampleTop: GPUComputePipeline;
 };
 
 type Scratch = {
@@ -139,14 +124,12 @@ type Scratch = {
   readonly activated: GPUBuffer;
   readonly projectedDown: GPUBuffer;
   readonly logits: GPUBuffer;
-  readonly sortedWeights: GPUBuffer;
-  readonly sortedTokenIds: GPUBuffer;
-  readonly prefixMasses: GPUBuffer;
-  readonly samplerParams: GPUBuffer;
+  readonly candidateValues: GPUBuffer;
+  readonly candidateIds: GPUBuffer;
 };
 
 type StaticBindings = {
-  readonly embedding: readonly GPUBindGroup[];
+  readonly embedding: GPUBindGroup;
   readonly valueEmbedding: GPUBindGroup;
   readonly embeddingNorm: GPUBindGroup;
   readonly inputNorm: GPUBindGroup;
@@ -156,16 +139,16 @@ type StaticBindings = {
   readonly swiglu: GPUBindGroup;
   readonly mudd24: GPUBindGroup;
   readonly mudd47: GPUBindGroup;
-  readonly head: readonly MatVecOperation[];
-  readonly prepareNucleusPartitions: GPUBindGroup;
-  readonly sampleNucleus: GPUBindGroup;
+  readonly head: Q4Operation;
+  readonly samplerPartitions: GPUBindGroup;
+  readonly samplerTop: GPUBindGroup;
 };
 
 export class LimiteWebGpuEngine {
   readonly device: GPUDevice;
   readonly timings: LimiteEngineTimings;
 
-  readonly #artifact: LoadedLimiteFullBf16Artifact;
+  readonly #artifact: LoadedLimiteQ4Artifact;
   readonly #pipelines: Pipelines;
   readonly #scratch: Scratch;
   readonly #parameters: GPUBuffer;
@@ -178,7 +161,7 @@ export class LimiteWebGpuEngine {
 
   private constructor(
     device: GPUDevice,
-    artifact: LoadedLimiteFullBf16Artifact,
+    artifact: LoadedLimiteQ4Artifact,
     pipelines: Pipelines,
     scratch: Scratch,
     parameters: GPUBuffer,
@@ -222,14 +205,14 @@ export class LimiteWebGpuEngine {
     const deviceMs = performance.now() - deviceStarted;
 
     const artifactStarted = performance.now();
-    const artifact = await loadLimiteFullBf16Artifact(device, onProgress);
+    const artifact = await loadLimiteQ4Artifact(device, onProgress);
     const artifactMs = performance.now() - artifactStarted;
     try {
       const pipelineStarted = performance.now();
       const pipelines = await createPipelines(device);
       const pipelineMs = performance.now() - pipelineStarted;
       device.pushErrorScope("validation");
-      const scratch = createScratch(device, artifact.smallLayout.samplingWeightByBf16);
+      const scratch = createScratch(device);
       const parameters = createParameterBuffer(device);
       seedRng(device, scratch.rng);
       const { bindings, layers } = createBindings(
@@ -262,20 +245,17 @@ export class LimiteWebGpuEngine {
     return this.#position;
   }
 
-  reset(samplerSeed = LIMITE_SAMPLER_SEED): void {
+  reset(): void {
     this.#position = 0;
-    seedRng(this.device, this.#scratch.rng, samplerSeed);
+    seedRng(this.device, this.#scratch.rng);
   }
 
-  async prefill(
-    tokens: readonly number[],
-    samplerSeed = LIMITE_SAMPLER_SEED,
-  ): Promise<number> {
+  async prefill(tokens: readonly number[]): Promise<number> {
     if (tokens.length === 0) throw new Error("The formatted prompt is empty.");
     if (tokens.length >= LIMITE_CONTEXT_TOKENS) {
       throw new Error(`The prompt exceeds the ${LIMITE_CONTEXT_TOKENS}-token context.`);
     }
-    this.reset(samplerSeed);
+    this.reset();
     for (let index = 0; index < tokens.length - 1; index++) {
       this.#submitToken(tokens[index], false);
     }
@@ -318,7 +298,7 @@ export class LimiteWebGpuEngine {
       new Uint32Array(this.#scratch.tokenReadback.getMappedRange(), 0, batchCount),
     );
     this.#scratch.tokenReadback.unmap();
-    if (sampled.some((value) => value >= LIMITE_TOKENIZER_VOCAB_SIZE)) {
+    if (sampled.some((value) => value >= LIMITE_VOCAB_SIZE)) {
       throw new Error("The GPU sampler returned an invalid token.");
     }
     return sampled;
@@ -350,7 +330,7 @@ export class LimiteWebGpuEngine {
           0,
           0,
           0,
-          this.#artifact.smallLayout.sigmoidByBf16,
+          0,
           0,
         ],
         qkvOffset,
@@ -372,7 +352,7 @@ export class LimiteWebGpuEngine {
           0,
           0,
           layer.cacheCapacity,
-          this.#artifact.smallLayout.sigmoidByBf16,
+          0,
           0,
         ],
         attentionOffset,
@@ -415,7 +395,7 @@ export class LimiteWebGpuEngine {
     await this.#scratch.tokenReadback.mapAsync(GPUMapMode.READ);
     const sampled = new Uint32Array(this.#scratch.tokenReadback.getMappedRange())[0];
     this.#scratch.tokenReadback.unmap();
-    if (sampled >= LIMITE_TOKENIZER_VOCAB_SIZE) {
+    if (sampled >= LIMITE_VOCAB_SIZE) {
       throw new Error("The GPU sampler returned an invalid token.");
     }
     return sampled;
@@ -431,10 +411,8 @@ export class LimiteWebGpuEngine {
     const localPartitions = Math.ceil(keyCount / ATTENTION_PARTITION_KEYS);
     const globalPartitions = Math.ceil((position + 1) / ATTENTION_PARTITION_KEYS);
 
-    for (const embedding of this.#bindings.embedding) {
-      dispatch(pass, this.#pipelines.packedBf16Embedding, embedding, 5);
-    }
-    dispatch(pass, this.#pipelines.packedBf16Embedding, this.#bindings.valueEmbedding, 1);
+    dispatch(pass, this.#pipelines.embedding, this.#bindings.embedding, 5);
+    dispatch(pass, this.#pipelines.embedding, this.#bindings.valueEmbedding, 1);
     dispatch(pass, this.#pipelines.rms, this.#bindings.embeddingNorm, 1);
     dispatch(pass, this.#pipelines.copy, this.#bindings.copyHistory0, 5);
     dispatch(pass, this.#pipelines.rms, this.#bindings.inputNorm, 1);
@@ -444,32 +422,32 @@ export class LimiteWebGpuEngine {
       if (index === 24) dispatch(pass, this.#pipelines.mudd, this.#bindings.mudd24, 1);
       if (index === 47) dispatch(pass, this.#pipelines.mudd, this.#bindings.mudd47, 1);
 
-      dispatchMatVec(pass, layer.qkv);
+      dispatchQ4(pass, this.#pipelines.q4, layer.qkv);
       dispatch(pass, this.#pipelines.qkv, layer.qkvBindGroups[parameterSlot], 12);
       const partitions = layer.isGlobal ? globalPartitions : localPartitions;
       dispatch(
         pass,
         this.#pipelines.attentionPartition,
         layer.attentionPartitionBindGroups[parameterSlot],
-        LIMITE_KV_HEADS,
+        LIMITE_QUERY_HEADS,
         partitions,
       );
       dispatch(
         pass,
         this.#pipelines.attentionFinalize,
         layer.attentionFinalizeBindGroups[parameterSlot],
-        LIMITE_KV_HEADS,
+        LIMITE_QUERY_HEADS,
       );
-      dispatchMatVec(pass, layer.output);
+      dispatchQ4(pass, this.#pipelines.q4, layer.output);
       dispatch(pass, this.#pipelines.mixAndNorm, layer.attentionResidualBindGroup, 1);
-      dispatchMatVec(pass, layer.gateUp);
+      dispatchQ4(pass, this.#pipelines.q4, layer.gateUp);
       dispatch(
         pass,
         this.#pipelines.swiglu,
         this.#bindings.swiglu,
         Math.ceil(LIMITE_INTERMEDIATE_SIZE / ELEMENTWISE_WORKGROUP_SIZE),
       );
-      dispatchMatVec(pass, layer.down);
+      dispatchQ4(pass, this.#pipelines.q4, layer.down);
       dispatch(pass, this.#pipelines.mixAndNorm, layer.mlpResidualBindGroup, 1);
 
       if (index === 11) dispatch(pass, this.#pipelines.copy, this.#bindings.copyHistory12, 5);
@@ -477,38 +455,30 @@ export class LimiteWebGpuEngine {
     }
 
     if (sample) {
-      for (const head of this.#bindings.head) {
-        dispatchMatVec(pass, head);
-      }
+      dispatchQ4(pass, this.#pipelines.q4, this.#bindings.head);
       dispatch(
         pass,
-        this.#pipelines.prepareNucleusPartitions,
-        this.#bindings.prepareNucleusPartitions,
+        this.#pipelines.samplePartitions,
+        this.#bindings.samplerPartitions,
         SAMPLER_PARTITIONS,
       );
-      dispatch(pass, this.#pipelines.sampleNucleus, this.#bindings.sampleNucleus, 1);
+      dispatch(pass, this.#pipelines.sampleTop, this.#bindings.samplerTop, 1);
     }
   }
 }
 
 async function createPipelines(device: GPUDevice): Promise<Pipelines> {
   const modules = {
-    packedBf16Embedding: device.createShaderModule({
-      label: "Limite exact BF16 embedding",
-      code: PACKED_BF16_EMBEDDING_WGSL,
-    }),
+    embedding: device.createShaderModule({ label: "Limite Q4 embedding", code: Q4_32_EMBEDDING_WGSL }),
     rms: device.createShaderModule({ label: "Limite RMS", code: RMS_NORM_F32_WGSL }),
-    packedBf16Matvec: device.createShaderModule({
-      label: "Limite exact BF16 matvec",
-      code: PACKED_BF16_MATVEC_WGSL,
-    }),
+    q4: device.createShaderModule({ label: "Limite Q4 matvec", code: Q4_32_MATVEC_WGSL }),
     qkv: device.createShaderModule({ label: "Limite QKV postprocess", code: QKV_POSTPROCESS_WGSL }),
     attention: device.createShaderModule({ label: "Limite attention", code: GQA_ATTENTION_WGSL }),
     mixAndNorm: device.createShaderModule({ label: "Limite residual norm", code: MIX_AND_NORM_WGSL }),
     swiglu: device.createShaderModule({ label: "Limite SwiGLU", code: SWIGLU_WGSL }),
     copy: device.createShaderModule({ label: "Limite vector copy", code: COPY_VECTOR_WGSL }),
     mudd: device.createShaderModule({ label: "Limite MUDD", code: MUDD_WGSL }),
-    sampler: device.createShaderModule({ label: "Limite sampler", code: GPU_TOP_P_SAMPLER_WGSL }),
+    sampler: device.createShaderModule({ label: "Limite sampler", code: GPU_TOP_K_TOP_P_SAMPLER_WGSL }),
   };
   const compilation = await Promise.all(
     Object.entries(modules).map(async ([name, module]) => ({ name, info: await module.getCompilationInfo() })),
@@ -520,20 +490,12 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
   );
   if (errors.length) throw new Error(`WebGPU shader compilation failed:\n${errors.join("\n")}`);
 
-  const pipeline = (
-    label: string,
-    module: GPUShaderModule,
-    entryPoint: string,
-    constants?: Record<string, GPUPipelineConstantValue>,
-  ) => device.createComputePipelineAsync({
-    label,
-    layout: "auto",
-    compute: { module, entryPoint, ...(constants ? { constants } : {}) },
-  });
+  const pipeline = (label: string, module: GPUShaderModule, entryPoint: string) =>
+    device.createComputePipelineAsync({ label, layout: "auto", compute: { module, entryPoint } });
   const [
-    packedBf16Embedding,
+    embedding,
     rms,
-    packedBf16Matvec,
+    q4,
     qkv,
     attentionPartition,
     attentionFinalize,
@@ -541,16 +503,12 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
     swiglu,
     copy,
     mudd,
-    prepareNucleusPartitions,
-    sampleNucleus,
+    samplePartitions,
+    sampleTop,
   ] = await Promise.all([
-    pipeline(
-      "Limite exact BF16 embedding",
-      modules.packedBf16Embedding,
-      "packed_bf16_embedding",
-    ),
+    pipeline("Limite Q4 embedding", modules.embedding, "q4_32_embedding"),
     pipeline("Limite RMS", modules.rms, "rms_norm_f32"),
-    pipeline("Limite exact BF16 matvec", modules.packedBf16Matvec, "packed_bf16_matvec"),
+    pipeline("Limite Q4 matvec", modules.q4, "q4_32_matvec"),
     pipeline("Limite QKV postprocess", modules.qkv, "qkv_postprocess"),
     pipeline("Limite attention partitions", modules.attention, "attention_partition"),
     pipeline("Limite attention finalize", modules.attention, "attention_finalize"),
@@ -558,17 +516,13 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
     pipeline("Limite SwiGLU", modules.swiglu, "swiglu"),
     pipeline("Limite vector copy", modules.copy, "copy_vector"),
     pipeline("Limite MUDD", modules.mudd, "mudd"),
-    pipeline(
-      "Limite nucleus partition preparation",
-      modules.sampler,
-      "prepare_nucleus_partitions",
-    ),
-    pipeline("Limite nucleus sampling", modules.sampler, "sample_nucleus"),
+    pipeline("Limite sampler partitions", modules.sampler, "sample_partitions"),
+    pipeline("Limite sampler final", modules.sampler, "sample_top_50"),
   ]);
   return {
-    packedBf16Embedding,
+    embedding,
     rms,
-    packedBf16Matvec,
+    q4,
     qkv,
     attentionPartition,
     attentionFinalize,
@@ -576,12 +530,12 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
     swiglu,
     copy,
     mudd,
-    prepareNucleusPartitions,
-    sampleNucleus,
+    samplePartitions,
+    sampleTop,
   };
 }
 
-function createScratch(device: GPUDevice, samplingWeightOffset: number): Scratch {
+function createScratch(device: GPUDevice): Scratch {
   const storage = (label: string, elements: number, extraUsage = 0) =>
     device.createBuffer({ label, size: align4(elements * 4), usage: STORAGE | extraUsage });
   return {
@@ -615,11 +569,9 @@ function createScratch(device: GPUDevice, samplingWeightOffset: number): Scratch
     gateUp: storage("Limite gate and up", LIMITE_INTERMEDIATE_SIZE * 2),
     activated: storage("Limite SwiGLU activation", LIMITE_INTERMEDIATE_SIZE),
     projectedDown: storage("Limite projected down", LIMITE_HIDDEN_SIZE),
-    logits: storage("Limite logits", LIMITE_PADDED_VOCAB_SIZE),
-    sortedWeights: storage("Limite sampler sorted weights", SAMPLER_ENTRIES),
-    sortedTokenIds: storage("Limite sampler sorted token ids", SAMPLER_ENTRIES),
-    prefixMasses: storage("Limite sampler prefix masses", SAMPLER_ENTRIES),
-    samplerParams: samplerParams(device, samplingWeightOffset),
+    logits: storage("Limite logits", LIMITE_VOCAB_SIZE),
+    candidateValues: storage("Limite sampler candidate values", SAMPLER_CANDIDATES),
+    candidateIds: storage("Limite sampler candidate ids", SAMPLER_CANDIDATES),
   };
 }
 
@@ -633,17 +585,16 @@ function createRopeTable(device: GPUDevice): GPUBuffer {
     mappedAtCreation: true,
   });
   const values = new Float32Array(buffer.getMappedRange());
-  const frequencyBits = new Uint32Array(LIMITE_ROPE_FREQUENCY_BITS);
-  const frequencies = new Float32Array(frequencyBits.buffer);
+  const frequencies = Array.from({ length: dimensions / 2 }, (_, pair) =>
+    Math.pow(1_024, -pair / (dimensions / 2 - 1)),
+  );
   for (let position = 0; position < LIMITE_CONTEXT_TOKENS; position++) {
     const positionBase = position * dimensions * valuesPerDimension;
     for (let dimension = 0; dimension < dimensions; dimension++) {
-      const theta = Math.fround(position * frequencies[dimension >> 1]);
+      const theta = position * frequencies[dimension >> 1];
       const offset = positionBase + dimension * valuesPerDimension;
-      values[offset] = roundToBf16(Math.fround(Math.cos(theta)));
-      values[offset + 1] = roundToBf16(
-        Math.fround(Math.sin(theta) * (dimension % 2 === 0 ? 1 : -1)),
-      );
+      values[offset] = Math.cos(theta);
+      values[offset + 1] = Math.sin(theta) * (dimension % 2 === 0 ? 1 : -1);
     }
   }
   buffer.unmap();
@@ -660,32 +611,17 @@ function createParameterBuffer(device: GPUDevice): GPUBuffer {
 
 function createBindings(
   device: GPUDevice,
-  artifact: LoadedLimiteFullBf16Artifact,
+  artifact: LoadedLimiteQ4Artifact,
   pipelines: Pipelines,
   scratch: Scratch,
   parameters: GPUBuffer,
 ): { bindings: StaticBindings; layers: readonly LayerRuntime[] } {
-  const embed = [
-    embeddingPackedBf16Tensor(artifact, "embed_tokens.0"),
-    embeddingPackedBf16Tensor(artifact, "embed_tokens.1"),
-    embeddingPackedBf16Tensor(artifact, "embed_tokens.2"),
-    embeddingPackedBf16Tensor(artifact, "embed_tokens.3"),
-  ];
-  const valueEmbed = embeddingPackedBf16Tensor(artifact, "value_embeds");
-  const embedding = embed.map((tensor, index) =>
-    packedBf16EmbeddingBindGroup(
-      device,
-      pipelines.packedBf16Embedding,
-      artifact,
-      tensor,
-      scratch.token,
-      scratch.embedding,
-      index === 0,
-    ),
-  );
-  const valueEmbedding = packedBf16EmbeddingBindGroup(
+  const embed = q4Tensor(artifact, "embed_tokens");
+  const valueEmbed = q4Tensor(artifact, "value_embeds");
+  const embedding = embeddingBindGroup(device, pipelines.embedding, artifact, embed, scratch.token, scratch.embedding);
+  const valueEmbedding = embeddingBindGroup(
     device,
-    pipelines.packedBf16Embedding,
+    pipelines.embedding,
     artifact,
     valueEmbed,
     scratch.token,
@@ -698,16 +634,7 @@ function createBindings(
   const copyHistory23 = twoStorageBindGroup(device, pipelines.copy, scratch.hiddenB, scratch.history23);
   const swigluParams = immutableUniform(
     device,
-    new Uint32Array([
-      0,
-      0,
-      LIMITE_INTERMEDIATE_SIZE,
-      artifact.smallLayout.siluByBf16,
-      0,
-      0,
-      0,
-      0,
-    ]),
+    new Uint32Array([0, 0, LIMITE_INTERMEDIATE_SIZE, 0, 0, 0, 0, 0]),
     "SwiGLU parameters",
   );
   const swiglu = device.createBindGroup({
@@ -717,7 +644,6 @@ function createBindings(
       storageEntry(0, scratch.gateUp),
       storageEntry(1, scratch.activated),
       uniformEntry(2, swigluParams),
-      storageEntry(3, artifact.smallWeights),
     ],
   });
 
@@ -732,47 +658,46 @@ function createBindings(
     const cacheCapacity = isGlobal ? LIMITE_CONTEXT_TOKENS : LIMITE_LOCAL_KEY_COUNT;
     const keyCache = device.createBuffer({
       label: `Limite layer ${index} key cache`,
-      size: cacheCapacity * KV_WIDTH * Uint16Array.BYTES_PER_ELEMENT,
+      size: cacheCapacity * KV_WIDTH * 4,
       usage: STORAGE,
     });
     const valueCache = device.createBuffer({
       label: `Limite layer ${index} value cache`,
-      size: cacheCapacity * KV_WIDTH * Uint16Array.BYTES_PER_ELEMENT,
+      size: cacheCapacity * KV_WIDTH * 4,
       usage: STORAGE,
     });
     const current = index % 2 === 0 ? scratch.hiddenA : scratch.hiddenB;
     const next = index % 2 === 0 ? scratch.hiddenB : scratch.hiddenA;
     const residualBase = index === 24 || index === 47 ? scratch.muddResidual : current;
-    const qkv = bodyMatVecBindGroup(
+    const qkv = q4BindGroup(
       device,
-      pipelines,
+      pipelines.q4,
       artifact,
-      `layers.${index}.qkv`,
+      q4Tensor(artifact, `layers.${index}.qkv`),
       scratch.attentionInput,
       scratch.projectedQkv,
-      0,
     );
-    const output = bodyMatVecBindGroup(
+    const output = q4BindGroup(
       device,
-      pipelines,
+      pipelines.q4,
       artifact,
-      `layers.${index}.o`,
+      q4Tensor(artifact, `layers.${index}.o`),
       scratch.attentionOutput,
       scratch.projectedOutput,
     );
-    const gateUp = bodyMatVecBindGroup(
+    const gateUp = q4BindGroup(
       device,
-      pipelines,
+      pipelines.q4,
       artifact,
-      `layers.${index}.gate_up`,
+      q4Tensor(artifact, `layers.${index}.gate_up`),
       scratch.mlpInput,
       scratch.gateUp,
     );
-    const down = bodyMatVecBindGroup(
+    const down = q4BindGroup(
       device,
-      pipelines,
+      pipelines.q4,
       artifact,
-      `layers.${index}.down`,
+      q4Tensor(artifact, `layers.${index}.down`),
       scratch.activated,
       scratch.projectedDown,
     );
@@ -793,7 +718,6 @@ function createBindings(
             48,
           ),
           storageEntry(6, scratch.rope),
-          storageEntry(7, artifact.smallWeights),
         ],
       }),
     );
@@ -877,39 +801,27 @@ function createBindings(
     });
   }
 
-  const head = embed.map(tensor =>
-    packedBf16MatVecBindGroup(
-      device,
-      pipelines.packedBf16Matvec,
-      artifact,
-      tensor,
-      scratch.attentionInput,
-      scratch.logits,
-      tensor.rowStart,
-    ),
-  );
-  const prepareNucleusPartitions = device.createBindGroup({
-    label: "Limite nucleus partition bindings",
-    layout: pipelines.prepareNucleusPartitions.getBindGroupLayout(0),
+  const head = q4BindGroup(device, pipelines.q4, artifact, embed, scratch.attentionInput, scratch.logits);
+  const samplerParamsBuffer = samplerParams(device);
+  const samplerPartitions = device.createBindGroup({
+    label: "Limite sampler partition bindings",
+    layout: pipelines.samplePartitions.getBindGroupLayout(0),
     entries: [
       storageEntry(0, scratch.logits),
-      storageEntry(1, scratch.sortedWeights),
-      storageEntry(2, scratch.sortedTokenIds),
-      storageEntry(3, scratch.prefixMasses),
-      uniformEntry(6, scratch.samplerParams),
-      storageEntry(7, artifact.smallWeights),
+      storageEntry(1, scratch.candidateValues),
+      storageEntry(2, scratch.candidateIds),
+      uniformEntry(5, samplerParamsBuffer),
     ],
   });
-  const sampleNucleus = device.createBindGroup({
-    label: "Limite nucleus sampling bindings",
-    layout: pipelines.sampleNucleus.getBindGroupLayout(0),
+  const samplerTop = device.createBindGroup({
+    label: "Limite sampler final bindings",
+    layout: pipelines.sampleTop.getBindGroupLayout(0),
     entries: [
-      storageEntry(1, scratch.sortedWeights),
-      storageEntry(2, scratch.sortedTokenIds),
-      storageEntry(3, scratch.prefixMasses),
-      storageEntry(4, scratch.token),
-      storageEntry(5, scratch.rng),
-      uniformEntry(6, scratch.samplerParams),
+      storageEntry(1, scratch.candidateValues),
+      storageEntry(2, scratch.candidateIds),
+      storageEntry(3, scratch.token),
+      storageEntry(4, scratch.rng),
+      uniformEntry(5, samplerParamsBuffer),
     ],
   });
 
@@ -926,93 +838,50 @@ function createBindings(
       mudd24,
       mudd47,
       head,
-      prepareNucleusPartitions,
-      sampleNucleus,
+      samplerPartitions,
+      samplerTop,
     },
     layers,
   };
 }
 
-function bodyMatrixTensor(
-  artifact: LoadedLimiteFullBf16Artifact,
-  name: string,
-): LimiteBodyPackedBf16TensorManifest {
+function q4Tensor(artifact: LoadedLimiteQ4Artifact, name: string): LimiteQ4TensorManifest {
   const tensor = artifact.manifest.tensors[name];
-  if (
-    !tensor ||
-    tensor.dtype !== "bf16" ||
-    !("precision" in tensor) ||
-    tensor.precision !== "oracle_exact"
-  ) {
-    throw new Error(`Missing exact BF16 body tensor ${name}.`);
-  }
-  return tensor as LimiteBodyPackedBf16TensorManifest;
+  if (!tensor || tensor.dtype !== "q4_block32") throw new Error(`Missing Q4 tensor ${name}.`);
+  return tensor;
 }
 
-function embeddingPackedBf16Tensor(
-  artifact: LoadedLimiteFullBf16Artifact,
-  name: string,
-): LimiteEmbeddingPackedBf16TensorManifest {
-  const tensor = artifact.manifest.tensors[name];
-  if (!tensor || tensor.dtype !== "bf16" || !("rowStart" in tensor)) {
-    throw new Error(`Missing exact BF16 embedding tensor ${name}.`);
-  }
-  return tensor as LimiteEmbeddingPackedBf16TensorManifest;
-}
-
-function bodyMatVecBindGroup(
-  device: GPUDevice,
-  pipelines: Pipelines,
-  artifact: LoadedLimiteFullBf16Artifact,
-  name: string,
-  input: GPUBuffer,
-  output: GPUBuffer,
-  outputOffset = 0,
-): MatVecOperation {
-  return packedBf16MatVecBindGroup(
-    device,
-    pipelines.packedBf16Matvec,
-    artifact,
-    bodyMatrixTensor(artifact, name),
-    input,
-    output,
-    outputOffset,
-  );
-}
-function packedBf16BindingResource(
-  artifact: LoadedLimiteFullBf16Artifact,
-  tensor: LimitePackedBf16TensorManifest,
+function q4BindingResource(
+  artifact: LoadedLimiteQ4Artifact,
+  tensor: LimiteQ4TensorManifest,
 ): GPUBufferBinding {
   return {
     buffer: artifact.shards[tensor.shard],
     offset: tensor.offset,
-    size: align4(tensor.byteLength),
+    size: align4(tensor.scaleOffset + tensor.scaleByteLength - tensor.offset),
   };
 }
 
-function packedBf16MatVecBindGroup(
+function q4BindGroup(
   device: GPUDevice,
   pipeline: GPUComputePipeline,
-  artifact: LoadedLimiteFullBf16Artifact,
-  tensor: LimitePackedBf16TensorManifest,
+  artifact: LoadedLimiteQ4Artifact,
+  tensor: LimiteQ4TensorManifest,
   input: GPUBuffer,
   output: GPUBuffer,
-  outputOffset = 0,
-): MatVecOperation {
+): Q4Operation {
   const [rows, columns] = tensor.shape;
   const params = immutableUniform(
     device,
-    new Uint32Array([rows, columns, outputOffset, 0, 0, 0, 0, 0]),
-    "Limite packed BF16 matvec parameters",
+    new Uint32Array([rows, columns, (tensor.scaleOffset - tensor.offset) / 4, 0]),
+    "Limite Q4 matvec parameters",
   );
   return {
-    pipeline,
     rows,
-    rowsPerGroup: PACKED_BF16_MATVEC_ROWS_PER_GROUP,
     bindGroup: device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: packedBf16BindingResource(artifact, tensor) },
+        { binding: 0, resource: q4BindingResource(artifact, tensor) },
         storageEntry(1, input),
         storageEntry(2, output),
         uniformEntry(3, params),
@@ -1021,34 +890,33 @@ function packedBf16MatVecBindGroup(
   };
 }
 
-function packedBf16EmbeddingBindGroup(
+function embeddingBindGroup(
   device: GPUDevice,
   pipeline: GPUComputePipeline,
-  artifact: LoadedLimiteFullBf16Artifact,
-  tensor: LimiteEmbeddingPackedBf16TensorManifest,
+  artifact: LoadedLimiteQ4Artifact,
+  tensor: LimiteQ4TensorManifest,
   token: GPUBuffer,
   output: GPUBuffer,
-  clearOnMiss = true,
 ): GPUBindGroup {
-  const [rows, width] = tensor.shape;
+  const [, width] = tensor.shape;
   const params = immutableUniform(
     device,
     new Uint32Array([
       0,
       0,
       width,
-      rows,
-      tensor.rowStart,
-      clearOnMiss ? 1 : 0,
+      LIMITE_VOCAB_SIZE,
+      (tensor.scaleOffset - tensor.offset) / 4,
+      0,
       0,
       0,
     ]),
-    "Limite packed BF16 embedding parameters",
+    "Limite embedding parameters",
   );
   return device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
-      { binding: 0, resource: packedBf16BindingResource(artifact, tensor) },
+      { binding: 0, resource: q4BindingResource(artifact, tensor) },
       storageEntry(1, token),
       storageEntry(2, output),
       uniformEntry(3, params),
@@ -1106,7 +974,7 @@ function mixBindGroup(
 function muddBindGroup(
   device: GPUDevice,
   pipeline: GPUComputePipeline,
-  artifact: LoadedLimiteFullBf16Artifact,
+  artifact: LoadedLimiteQ4Artifact,
   current: GPUBuffer,
   middle: GPUBuffer,
   layer: 24 | 47,
@@ -1122,7 +990,7 @@ function muddBindGroup(
       layout.dense2Mlp,
       layout.bias,
       layout.biasMlp,
-      layout.geluByBf16,
+      0,
       0,
     ]),
     `Limite MUDD ${layer} parameters`,
@@ -1142,13 +1010,12 @@ function muddBindGroup(
   });
 }
 
-function samplerParams(device: GPUDevice, samplingWeightOffset: number): GPUBuffer {
+function samplerParams(device: GPUDevice): GPUBuffer {
   const bytes = new ArrayBuffer(48);
   const view = new DataView(bytes);
-  view.setUint32(0, LIMITE_TOKENIZER_VOCAB_SIZE, true);
-  view.setUint32(12, SAMPLER_ENTRIES, true);
+  view.setUint32(0, LIMITE_VOCAB_SIZE, true);
+  view.setUint32(12, SAMPLER_CANDIDATES, true);
   view.setUint32(24, SAMPLER_PARTITIONS, true);
-  view.setUint32(28, samplingWeightOffset, true);
   view.setFloat32(32, 0.6, true);
   view.setFloat32(36, 0.95, true);
   return immutableUniform(device, new Uint8Array(bytes), "Limite sampler parameters");
@@ -1225,37 +1092,19 @@ function dispatch(
   pass.dispatchWorkgroups(x, y);
 }
 
-function dispatchMatVec(
+function dispatchQ4(
   pass: GPUComputePassEncoder,
-  operation: MatVecOperation,
+  pipeline: GPUComputePipeline,
+  operation: Q4Operation,
 ): void {
-  dispatch(
-    pass,
-    operation.pipeline,
-    operation.bindGroup,
-    Math.ceil(operation.rows / operation.rowsPerGroup),
-  );
+  dispatch(pass, pipeline, operation.bindGroup, Math.ceil(operation.rows / Q4_32_MATVEC_ROWS_PER_GROUP));
 }
 
-function seedRng(
-  device: GPUDevice,
-  buffer: GPUBuffer,
-  seed = LIMITE_SAMPLER_SEED,
-): void {
-  device.queue.writeBuffer(buffer, 0, new Uint32Array([seed]));
-}
-
-const BF16_ROUND_BUFFER = new ArrayBuffer(4);
-const BF16_ROUND_F32 = new Float32Array(BF16_ROUND_BUFFER);
-const BF16_ROUND_U32 = new Uint32Array(BF16_ROUND_BUFFER);
-
-/** Round f32 to BF16 with round-to-nearest-even, returning it as an f32. */
-function roundToBf16(value: number): number {
-  BF16_ROUND_F32[0] = Math.fround(value);
-  const bits = BF16_ROUND_U32[0];
-  const rounded = (bits + 0x7fff + ((bits >>> 16) & 1)) >>> 0;
-  BF16_ROUND_U32[0] = rounded & 0xffff0000;
-  return BF16_ROUND_F32[0];
+function seedRng(device: GPUDevice, buffer: GPUBuffer): void {
+  const seed = new Uint32Array(1);
+  crypto.getRandomValues(seed);
+  if (seed[0] === 0) seed[0] = 0x6d2b79f5;
+  device.queue.writeBuffer(buffer, 0, seed);
 }
 
 function align4(value: number): number {
@@ -1264,15 +1113,4 @@ function align4(value: number): number {
 
 function align16(value: number): number {
   return Math.ceil(value / 16) * 16;
-}
-
-function resolveTokenizerUrl(): string {
-  if (!import.meta.env.DEV) return PINNED_LIMITE_TOKENIZER_URL;
-  const configured = import.meta.env.VITE_LIMITE_TOKENIZER_URL?.trim();
-  if (!configured) return PINNED_LIMITE_TOKENIZER_URL;
-  const url = new URL(configured);
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("VITE_LIMITE_TOKENIZER_URL must use HTTP or HTTPS.");
-  }
-  return url.href;
 }

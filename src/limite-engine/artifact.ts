@@ -1,40 +1,12 @@
-export const PINNED_FULL_BF16_MANIFEST_URL =
-  "https://huggingface.co/gustofied/kalkulator/resolve/df708b2170cecfde605a77dd57cd5bb78f36c852/webgpu-full-bf16-v16/manifest.json" as const;
+export const PINNED_Q4_MANIFEST_URL =
+  "https://huggingface.co/gustofied/kalkulator/resolve/f66f2e77b2bfd4e8aa80e0770943c3c0d3414f18/webgpu-q4-v2/manifest.json" as const;
 
-const LIMITE_MANIFEST_URL = resolveManifestUrl();
-const USING_CUSTOM_DEV_MANIFEST =
-  import.meta.env.DEV && LIMITE_MANIFEST_URL !== PINNED_FULL_BF16_MANIFEST_URL;
-const ARTIFACT_FETCH_CACHE: RequestCache =
-  USING_CUSTOM_DEV_MANIFEST ? "no-store" : "force-cache";
-const KALKULATOR_ARTIFACT_CACHE_NAME =
-  /^kalkulator-(?:q4|model-v\d+)-[0-9a-f]{20,64}\.bin$/;
-
-const MANIFEST_VERSION = 16;
-const EXPECTED_SHARD_BYTE_LENGTHS = [
-  115_200_000,
-  115_200_000,
-  115_200_000,
-  42_700_800,
-  115_727_872,
-  103_630_336,
-  117_392_896,
-  116_763_648,
-  117_392_896,
-  116_763_648,
-  117_392_896,
-  116_768_768,
-  117_392_896,
-  116_763_648,
-  117_392_896,
-  116_763_648,
-  117_392_896,
-  116_768_768,
-  60_259_840,
-] as const;
-const SHARD_COUNT = EXPECTED_SHARD_BYTE_LENGTHS.length;
+const MANIFEST_VERSION = 1;
+const SHARD_COUNT = 6;
 const ALIGNMENT = 256;
 const SHARD_MAX_BYTES = 112 * 1024 * 1024;
-const EMBED_SEGMENT_ROWS = 45_000;
+const Q4_BLOCK_SIZE = 32;
+const LEGACY_MODEL_CACHE_NAME = /^kalkulator-model-v\d+-[0-9a-f]{20}\.bin$/;
 const LAYER_COUNT = 48;
 const HIDDEN_SIZE = 1_280;
 const INTERMEDIATE_SIZE = 3_328;
@@ -49,20 +21,7 @@ const VALUE_LAYERS = Array.from({ length: 16 }, (_, index) => index * 3 + 1);
 const XSA_LAYERS = Array.from({ length: LAYER_COUNT }, (_, index) => index);
 const VALUE_LAYER_SET = new Set(VALUE_LAYERS);
 
-function resolveManifestUrl(): string {
-  if (!import.meta.env.DEV) return PINNED_FULL_BF16_MANIFEST_URL;
-
-  const configured = import.meta.env.VITE_LIMITE_MANIFEST_URL?.trim();
-  if (!configured) return PINNED_FULL_BF16_MANIFEST_URL;
-
-  const url = new URL(configured);
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("VITE_LIMITE_MANIFEST_URL must use HTTP or HTTPS.");
-  }
-  return url.href;
-}
-
-export type LimiteFullBf16SourceManifest = {
+export type LimiteQ4SourceManifest = {
   readonly repo: "paradigma-inc/limite-1b-violetto";
   readonly revision: "b1f3d572ccacb6919f4d64c321b70ba034ddaef2";
   readonly file: "model.safetensors";
@@ -70,27 +29,17 @@ export type LimiteFullBf16SourceManifest = {
   readonly byteLength: 2_070_811_520;
 };
 
-export type LimiteFullBf16FormatManifest = {
+export type LimiteQ4FormatManifest = {
   readonly alignment: 256;
   readonly shardMaxBytes: 117_440_512;
-  readonly tiedEmbedding: {
-    readonly dtype: "bf16";
-    readonly packing: "two_bf16_values_per_u32_little_endian";
-    readonly matrixLayout: "output_major";
-    readonly roles: readonly ["token_embedding", "lm_head"];
-  };
-  readonly valueEmbedding: {
-    readonly dtype: "bf16";
-    readonly packing: "two_bf16_values_per_u32_little_endian";
-    readonly matrixLayout: "output_major";
-    readonly precision: "oracle_exact";
-    readonly roles: readonly ["value_embedding"];
-  };
-  readonly bodyPrecision: {
-    readonly default: "bf16";
-    readonly exactBf16Layers: readonly number[];
-    readonly exactBf16Projections: readonly ["qkv", "o", "gate_up", "down"];
-    readonly packing: "two_bf16_values_per_u32_little_endian";
+  readonly quantization: {
+    readonly dtype: "q4_block32";
+    readonly blockSize: 32;
+    readonly nibbleOrder: "low_first";
+    readonly storedValue: "signed_plus_8";
+    readonly signedRange: readonly [-7, 7];
+    readonly scale: "max_abs_div_7";
+    readonly scaleDtype: "f16";
     readonly matrixLayout: "output_major";
   };
 };
@@ -123,9 +72,6 @@ export type LimiteModelManifest = {
   readonly rope_n_pairs: 32;
   readonly rope_style: "interleaved_pairs_odd_lane_sign_flip";
   readonly tie_word_embeddings: true;
-  readonly lm_head_precision_mode: "oracle_exact";
-  readonly value_embedding_precision_mode: "oracle_exact";
-  readonly body_precision_mode: "full_bf16_oracle_exact";
   readonly ve_layers: readonly number[];
   readonly ve_dim: 128;
   readonly ve_stored_heads: 2;
@@ -172,35 +118,17 @@ type LimiteTensorBase = {
   readonly shape: readonly number[];
 };
 
-type LimitePackedBf16TensorBase = LimiteTensorBase & {
-  readonly dtype: "bf16";
+export type LimiteQ4TensorManifest = LimiteTensorBase & {
+  readonly dtype: "q4_block32";
   readonly shape: readonly [number, number];
-};
-
-export type LimiteTiedPackedBf16TensorManifest = LimitePackedBf16TensorBase & {
-  readonly roles: readonly ["token_embedding", "lm_head"];
-  readonly rowStart: number;
-};
-
-export type LimiteValuePackedBf16TensorManifest = LimitePackedBf16TensorBase & {
-  readonly roles: readonly ["value_embedding"];
-  readonly rowStart: 0;
-  readonly rowShape: readonly [2, 128];
-};
-
-export type LimiteEmbeddingPackedBf16TensorManifest =
-  | LimiteTiedPackedBf16TensorManifest
-  | LimiteValuePackedBf16TensorManifest;
-
-export type LimiteBodyPackedBf16TensorManifest = LimitePackedBf16TensorBase & {
-  readonly roles: readonly [string];
-  readonly precision: "oracle_exact";
+  readonly scaleOffset: number;
+  readonly scaleOffsetWords: number;
+  readonly scaleByteLength: number;
+  readonly scaleShape: readonly [number, number];
+  readonly roles?: readonly string[];
+  readonly rowShape?: readonly number[];
   readonly parts?: readonly LimiteTensorPart[];
 };
-
-export type LimitePackedBf16TensorManifest =
-  | LimiteEmbeddingPackedBf16TensorManifest
-  | LimiteBodyPackedBf16TensorManifest;
 
 export type LimiteSmallTensorManifest = LimiteTensorBase & {
   readonly dtype: "f32";
@@ -208,14 +136,13 @@ export type LimiteSmallTensorManifest = LimiteTensorBase & {
   readonly parts?: readonly string[];
 };
 
-export type LimiteTensorManifest =
-  | LimitePackedBf16TensorManifest
-  | LimiteSmallTensorManifest;
+export type LimiteTensorManifest = LimiteQ4TensorManifest | LimiteSmallTensorManifest;
+export type Q4TensorEntry = LimiteQ4TensorManifest;
 
-export type LimiteFullBf16Manifest = {
-  readonly version: 16;
-  readonly source: LimiteFullBf16SourceManifest;
-  readonly format: LimiteFullBf16FormatManifest;
+export type LimiteQ4Manifest = {
+  readonly version: 1;
+  readonly source: LimiteQ4SourceManifest;
+  readonly format: LimiteQ4FormatManifest;
   readonly model: LimiteModelManifest;
   readonly shards: readonly LimiteShardManifest[];
   readonly tensors: Readonly<Record<string, LimiteTensorManifest>>;
@@ -235,11 +162,6 @@ export type LimiteArtifactProgress =
 
 export type LimiteArtifactProgressCallback = (progress: LimiteArtifactProgress) => void;
 
-type ArtifactCacheSession = {
-  readonly root: FileSystemDirectoryHandle;
-  writeEnabled: boolean;
-};
-
 const XSA_OFFSET = 0;
 const XSA_LENGTH = LAYER_COUNT * QUERY_HEADS;
 const LAMBDAS_OFFSET = XSA_OFFSET + XSA_LENGTH;
@@ -254,12 +176,7 @@ const MUDD_BIAS_OFFSET = MUDD_DENSE2_MLP_OFFSET + MUDD_DENSE2_MLP_LENGTH;
 const MUDD_BIAS_LENGTH = LAYER_COUNT * 3;
 const MUDD_BIAS_MLP_OFFSET = MUDD_BIAS_OFFSET + MUDD_BIAS_LENGTH;
 const MUDD_BIAS_MLP_LENGTH = LAYER_COUNT * 3;
-const GELU_LOOKUP_OFFSET = MUDD_BIAS_MLP_OFFSET + MUDD_BIAS_MLP_LENGTH;
-const BF16_LOOKUP_LENGTH = 1 << 16;
-const SILU_LOOKUP_OFFSET = GELU_LOOKUP_OFFSET + BF16_LOOKUP_LENGTH;
-const SIGMOID_LOOKUP_OFFSET = SILU_LOOKUP_OFFSET + BF16_LOOKUP_LENGTH;
-const SAMPLING_WEIGHT_LOOKUP_OFFSET = SIGMOID_LOOKUP_OFFSET + BF16_LOOKUP_LENGTH;
-const SMALL_TENSOR_ELEMENTS = SAMPLING_WEIGHT_LOOKUP_OFFSET + BF16_LOOKUP_LENGTH;
+const SMALL_TENSOR_ELEMENTS = MUDD_BIAS_MLP_OFFSET + MUDD_BIAS_MLP_LENGTH;
 
 export const SMALL_TENSOR_LAYOUT = {
   xsa: XSA_OFFSET,
@@ -269,10 +186,6 @@ export const SMALL_TENSOR_LAYOUT = {
   dense2Mlp: MUDD_DENSE2_MLP_OFFSET,
   bias: MUDD_BIAS_OFFSET,
   biasMlp: MUDD_BIAS_MLP_OFFSET,
-  geluByBf16: GELU_LOOKUP_OFFSET,
-  siluByBf16: SILU_LOOKUP_OFFSET,
-  sigmoidByBf16: SIGMOID_LOOKUP_OFFSET,
-  samplingWeightByBf16: SAMPLING_WEIGHT_LOOKUP_OFFSET,
 } as const;
 
 /** Shapes and row-major strides for the f32 arena addressed by SMALL_TENSOR_LAYOUT. */
@@ -290,22 +203,10 @@ export const SMALL_TENSOR_METADATA = {
   },
   bias: { shape: [LAYER_COUNT, 3], strides: [3, 1], length: MUDD_BIAS_LENGTH },
   biasMlp: { shape: [LAYER_COUNT, 3], strides: [3, 1], length: MUDD_BIAS_MLP_LENGTH },
-  geluByBf16: { shape: [BF16_LOOKUP_LENGTH], strides: [1], length: BF16_LOOKUP_LENGTH },
-  siluByBf16: { shape: [BF16_LOOKUP_LENGTH], strides: [1], length: BF16_LOOKUP_LENGTH },
-  sigmoidByBf16: {
-    shape: [BF16_LOOKUP_LENGTH],
-    strides: [1],
-    length: BF16_LOOKUP_LENGTH,
-  },
-  samplingWeightByBf16: {
-    shape: [BF16_LOOKUP_LENGTH],
-    strides: [1],
-    length: BF16_LOOKUP_LENGTH,
-  },
 } as const;
 
-export type LoadedLimiteFullBf16Artifact = {
-  readonly manifest: LimiteFullBf16Manifest;
+export type LoadedLimiteQ4Artifact = {
+  readonly manifest: LimiteQ4Manifest;
   readonly shards: readonly GPUBuffer[];
   readonly smallWeights: GPUBuffer;
   readonly smallValues: Float32Array;
@@ -314,7 +215,7 @@ export type LoadedLimiteFullBf16Artifact = {
 };
 
 type Range = { readonly start: number; readonly end: number; readonly label: string };
-type ExpectedPackedBf16 = {
+type ExpectedQ4 = {
   readonly shape: readonly [number, number];
   readonly extras: Readonly<Record<string, unknown>>;
 };
@@ -323,23 +224,16 @@ type ExpectedSmall = {
   readonly extras: Readonly<Record<string, unknown>>;
 };
 
-const EXPECTED_PACKED_BF16 = new Map<string, ExpectedPackedBf16>();
+const EXPECTED_Q4 = new Map<string, ExpectedQ4>();
 const EXPECTED_SMALL = new Map<string, ExpectedSmall>();
 
-for (let rowStart = 0, segment = 0; rowStart < VOCAB_SIZE; rowStart += EMBED_SEGMENT_ROWS) {
-  EXPECTED_PACKED_BF16.set(`embed_tokens.${segment}`, {
-    shape: [Math.min(EMBED_SEGMENT_ROWS, VOCAB_SIZE - rowStart), HIDDEN_SIZE],
-    extras: { roles: ["token_embedding", "lm_head"], rowStart },
-  });
-  segment++;
-}
-EXPECTED_PACKED_BF16.set("value_embeds", {
+EXPECTED_Q4.set("embed_tokens", {
+  shape: [VOCAB_SIZE, HIDDEN_SIZE],
+  extras: { roles: ["token_embedding", "lm_head"] },
+});
+EXPECTED_Q4.set("value_embeds", {
   shape: [VOCAB_SIZE, KV_HEADS * HEAD_DIM],
-  extras: {
-    roles: ["value_embedding"],
-    rowStart: 0,
-    rowShape: [KV_HEADS, HEAD_DIM],
-  },
+  extras: { rowShape: [KV_HEADS, HEAD_DIM] },
 });
 
 for (let layer = 0; layer < LAYER_COUNT; layer++) {
@@ -370,53 +264,31 @@ for (let layer = 0; layer < LAYER_COUNT; layer++) {
     });
   }
   const qkvRows = qkvParts.reduce((count, part) => count + part.rowCount, 0);
-  const bodyMatrices: readonly {
-    readonly projection: "qkv" | "o" | "gate_up" | "down";
-    readonly name: string;
-    readonly shape: readonly [number, number];
-    readonly extras: Readonly<Record<string, unknown>>;
-  }[] = [
-    {
-      projection: "qkv",
-      name: `${prefix}.qkv`,
-      shape: [qkvRows, HIDDEN_SIZE],
-      extras: { parts: qkvParts, roles: ["attention_qkv_and_gates_projection"] },
+  EXPECTED_Q4.set(`${prefix}.qkv`, {
+    shape: [qkvRows, HIDDEN_SIZE],
+    extras: { parts: qkvParts },
+  });
+  EXPECTED_Q4.set(`${prefix}.o`, {
+    shape: [HIDDEN_SIZE, HIDDEN_SIZE],
+    extras: {},
+  });
+  EXPECTED_Q4.set(`${prefix}.gate_up`, {
+    shape: [INTERMEDIATE_SIZE * 2, HIDDEN_SIZE],
+    extras: {
+      parts: [
+        { name: "gate", rowStart: 0, rowCount: INTERMEDIATE_SIZE },
+        {
+          name: "up",
+          rowStart: INTERMEDIATE_SIZE,
+          rowCount: INTERMEDIATE_SIZE,
+        },
+      ],
     },
-    {
-      projection: "o",
-      name: `${prefix}.o`,
-      shape: [HIDDEN_SIZE, HIDDEN_SIZE],
-      extras: { roles: ["attention_output_projection"] },
-    },
-    {
-      projection: "gate_up",
-      name: `${prefix}.gate_up`,
-      shape: [INTERMEDIATE_SIZE * 2, HIDDEN_SIZE],
-      extras: {
-        parts: [
-          { name: "gate", rowStart: 0, rowCount: INTERMEDIATE_SIZE },
-          {
-            name: "up",
-            rowStart: INTERMEDIATE_SIZE,
-            rowCount: INTERMEDIATE_SIZE,
-          },
-        ],
-        roles: ["mlp_gate_and_up_projection"],
-      },
-    },
-    {
-      projection: "down",
-      name: `${prefix}.down`,
-      shape: [HIDDEN_SIZE, INTERMEDIATE_SIZE],
-      extras: { roles: ["mlp_down_projection"] },
-    },
-  ];
-  for (const matrix of bodyMatrices) {
-    EXPECTED_PACKED_BF16.set(matrix.name, {
-      shape: matrix.shape,
-      extras: { ...matrix.extras, precision: "oracle_exact" },
-    });
-  }
+  });
+  EXPECTED_Q4.set(`${prefix}.down`, {
+    shape: [HIDDEN_SIZE, INTERMEDIATE_SIZE],
+    extras: {},
+  });
   EXPECTED_SMALL.set(`${prefix}.xsa_alpha`, {
     shape: [QUERY_HEADS],
     extras: { transform: "tanh" },
@@ -442,16 +314,9 @@ EXPECTED_SMALL.set("mudd.dense2_mlp", {
 });
 EXPECTED_SMALL.set("mudd.bias", { shape: [LAYER_COUNT, 3], extras: {} });
 EXPECTED_SMALL.set("mudd.bias_mlp", { shape: [LAYER_COUNT, 3], extras: {} });
-EXPECTED_SMALL.set("runtime.gelu_bf16", { shape: [BF16_LOOKUP_LENGTH], extras: {} });
-EXPECTED_SMALL.set("runtime.silu_bf16", { shape: [BF16_LOOKUP_LENGTH], extras: {} });
-EXPECTED_SMALL.set("runtime.sigmoid_bf16", { shape: [BF16_LOOKUP_LENGTH], extras: {} });
-EXPECTED_SMALL.set("runtime.sampling_weight_by_bf16", {
-  shape: [BF16_LOOKUP_LENGTH],
-  extras: {},
-});
 
-/** Validates the fixed v16 full-BF16 artifact contract. */
-export function validateLimiteFullBf16Manifest(value: unknown): LimiteFullBf16Manifest {
+/** Validates the complete, fixed artifact contract emitted by pack-limite-q4.py. */
+export function validateLimiteQ4Manifest(value: unknown): LimiteQ4Manifest {
   const root = objectAt(value, "manifest");
   exactKeys(root, ["version", "source", "format", "model", "shards", "tensors"], "manifest");
   literal(root.version, MANIFEST_VERSION, "manifest.version");
@@ -467,7 +332,7 @@ export function validateLimiteFullBf16Manifest(value: unknown): LimiteFullBf16Ma
   const shardManifests = shards.map((entry, index) => validateShard(entry, index));
 
   const tensors = objectAt(root.tensors, "manifest.tensors");
-  const expectedTensorCount = EXPECTED_PACKED_BF16.size + EXPECTED_SMALL.size;
+  const expectedTensorCount = EXPECTED_Q4.size + EXPECTED_SMALL.size;
   if (Object.keys(tensors).length !== expectedTensorCount) {
     fail(
       `manifest.tensors must contain exactly ${expectedTensorCount} tensors; found ${Object.keys(tensors).length}`,
@@ -475,10 +340,10 @@ export function validateLimiteFullBf16Manifest(value: unknown): LimiteFullBf16Ma
   }
 
   const rangesByShard = Array.from({ length: SHARD_COUNT }, () => [] as Range[]);
-  for (const [name, expected] of EXPECTED_PACKED_BF16) {
+  for (const [name, expected] of EXPECTED_Q4) {
     const tensor = tensors[name];
     if (tensor === undefined) fail(`manifest.tensors is missing ${name}`);
-    validatePackedBf16Tensor(name, tensor, expected, shardManifests, rangesByShard);
+    validateQ4Tensor(name, tensor, expected, shardManifests, rangesByShard);
   }
   for (const [name, expected] of EXPECTED_SMALL) {
     const tensor = tensors[name];
@@ -486,10 +351,7 @@ export function validateLimiteFullBf16Manifest(value: unknown): LimiteFullBf16Ma
     validateSmallTensor(name, tensor, expected, shardManifests, rangesByShard);
   }
   for (const name of Object.keys(tensors)) {
-    if (
-      !EXPECTED_PACKED_BF16.has(name) &&
-      !EXPECTED_SMALL.has(name)
-    ) {
+    if (!EXPECTED_Q4.has(name) && !EXPECTED_SMALL.has(name)) {
       fail(`manifest.tensors contains unexpected tensor ${name}`);
     }
   }
@@ -505,23 +367,23 @@ export function validateLimiteFullBf16Manifest(value: unknown): LimiteFullBf16Ma
     }
   }
 
-  return deepFreeze(root) as unknown as LimiteFullBf16Manifest;
+  return deepFreeze(root) as unknown as LimiteQ4Manifest;
 }
 
-export async function loadLimiteFullBf16Artifact(
+export async function loadLimiteQ4Artifact(
   device: GPUDevice,
   onProgress: LimiteArtifactProgressCallback = () => {},
-): Promise<LoadedLimiteFullBf16Artifact> {
+): Promise<LoadedLimiteQ4Artifact> {
   onProgress({ phase: "manifest" });
-  const manifestResponse = await fetch(LIMITE_MANIFEST_URL, { cache: ARTIFACT_FETCH_CACHE });
+  const manifestResponse = await fetch(PINNED_Q4_MANIFEST_URL, { cache: "force-cache" });
   if (!manifestResponse.ok) {
     throw new Error(
-      `Could not fetch Limite full-BF16 manifest (${manifestResponse.status} ${manifestResponse.statusText}).`,
+      `Could not fetch Limite Q4 manifest (${manifestResponse.status} ${manifestResponse.statusText}).`,
     );
   }
-  const manifest = validateLimiteFullBf16Manifest(await manifestResponse.json());
+  const manifest = validateLimiteQ4Manifest(await manifestResponse.json());
+  await removeStaleCachedShards(manifest.shards);
   const totalBytes = manifest.shards.reduce((total, shard) => total + shard.byteLength, 0);
-  const cache = await prepareArtifactCache(manifest.shards, totalBytes);
   const smallValues = new Float32Array(SMALL_TENSOR_METADATA.elementLength);
   const shards: GPUBuffer[] = [];
   let loadedBytes = 0;
@@ -529,7 +391,7 @@ export async function loadLimiteFullBf16Artifact(
   try {
     for (let shardIndex = 0; shardIndex < manifest.shards.length; shardIndex++) {
       const shard = manifest.shards[shardIndex];
-      const url = new URL(shard.url, LIMITE_MANIFEST_URL).href;
+      const url = new URL(shard.url, PINNED_Q4_MANIFEST_URL).href;
       const bytes = await fetchShard(
         url,
         shard,
@@ -537,10 +399,9 @@ export async function loadLimiteFullBf16Artifact(
         totalBytes,
         loadedBytes,
         onProgress,
-        cache,
       );
       extractSmallTensors(manifest, shardIndex, bytes, smallValues);
-      const buffer = immutableStorageBuffer(device, bytes, `Limite full BF16 ${shard.file}`);
+      const buffer = immutableStorageBuffer(device, bytes, `Limite Q4 ${shard.file}`);
       shards.push(buffer);
       loadedBytes += bytes.byteLength;
     }
@@ -579,9 +440,8 @@ async function fetchShard(
   totalBytes: number,
   previousBytes: number,
   onProgress: LimiteArtifactProgressCallback,
-  cache: ArtifactCacheSession | null,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const cached = await readCachedShard(cache, shard);
+  const cached = await readCachedShard(shard);
   if (cached) {
     onProgress({
       phase: "shards",
@@ -595,10 +455,10 @@ async function fetchShard(
     return cached;
   }
 
-  const response = await fetch(url, { cache: ARTIFACT_FETCH_CACHE });
+  const response = await fetch(url, { cache: "force-cache" });
   if (!response.ok) {
     throw new Error(
-      `Could not fetch Limite full-BF16 shard ${shardIndex + 1}/${SHARD_COUNT} ` +
+      `Could not fetch Limite Q4 shard ${shardIndex + 1}/${SHARD_COUNT} ` +
         `(${response.status} ${response.statusText}).`,
     );
   }
@@ -646,198 +506,73 @@ async function fetchShard(
   if (offset !== shard.byteLength) {
     throw new Error(`Shard ${shard.file} is ${offset} bytes; expected ${shard.byteLength}.`);
   }
-  await verifyShardHash(shard, bytes);
-  await cacheShard(cache, shard, bytes);
+  await cacheShard(shard, bytes);
   return bytes;
 }
 
 function shardCacheName(shard: LimiteShardManifest): string {
-  return `kalkulator-model-v${MANIFEST_VERSION}-${shard.sha256.slice(0, 20)}.bin`;
+  return `kalkulator-q4-${shard.sha256.slice(0, 20)}.bin`;
 }
 
-async function prepareArtifactCache(
-  shards: readonly LimiteShardManifest[],
-  totalBytes: number,
-): Promise<ArtifactCacheSession | null> {
-  if (USING_CUSTOM_DEV_MANIFEST) return null;
-  await requestPersistentArtifactStorage();
-
-  let root: FileSystemDirectoryHandle;
+async function removeStaleCachedShards(shards: readonly LimiteShardManifest[]): Promise<void> {
   try {
-    root = await navigator.storage.getDirectory();
-  } catch (error) {
-    console.warn("Persistent model cache is unavailable; shards will use the network.", error);
-    return null;
-  }
-
-  const current = new Map(shards.map(shard => [shardCacheName(shard), shard.byteLength]));
-  let cachedBytes = 0;
-  try {
+    const root = await navigator.storage.getDirectory();
+    const current = new Set(shards.map(shardCacheName));
     const iterable = root as FileSystemDirectoryHandle & {
       keys(): AsyncIterableIterator<string>;
     };
     for await (const name of iterable.keys()) {
-      const expectedBytes = current.get(name);
-      if (expectedBytes !== undefined) {
-        try {
-          const handle = await root.getFileHandle(name);
-          const file = await handle.getFile();
-          if (file.size === expectedBytes) {
-            cachedBytes += expectedBytes;
-          } else {
-            await root.removeEntry(name);
-          }
-        } catch (error) {
-          if (!isDomException(error, "NotFoundError")) {
-            console.warn(`Could not inspect cached model shard ${name}.`, error);
-          }
-        }
-        continue;
-      }
-
-      if (KALKULATOR_ARTIFACT_CACHE_NAME.test(name)) {
-        try {
-          await root.removeEntry(name);
-        } catch (error) {
-          console.warn(`Could not remove stale model cache entry ${name}.`, error);
-        }
+      if (
+        (name.startsWith("kalkulator-q4-") || LEGACY_MODEL_CACHE_NAME.test(name)) &&
+        !current.has(name)
+      ) {
+        await root.removeEntry(name);
       }
     }
   } catch (error) {
     console.warn("Could not prune old model cache entries.", error);
   }
-
-  await reportArtifactCacheCapacity(
-    Math.max(0, totalBytes - cachedBytes),
-    Math.max(...shards.map(shard => shard.byteLength)),
-  );
-  return { root, writeEnabled: true };
-}
-
-async function requestPersistentArtifactStorage(): Promise<void> {
-  try {
-    const persistent = await navigator.storage.persist();
-    if (!persistent) {
-      console.info("Persistent model storage was not granted; cache eviction remains possible.");
-    }
-  } catch (error) {
-    console.warn("Could not request persistent model storage; continuing best-effort.", error);
-  }
-}
-
-async function reportArtifactCacheCapacity(
-  missingBytes: number,
-  largestShardBytes: number,
-): Promise<void> {
-  if (missingBytes === 0) return;
-
-  try {
-    const { quota, usage } = await navigator.storage.estimate();
-    if (quota === undefined || usage === undefined) return;
-    const availableBytes = Math.max(0, quota - usage);
-    const transactionSafeBytes = missingBytes + largestShardBytes;
-    if (availableBytes < transactionSafeBytes) {
-      console.warn(
-        "The browser may not have enough quota to persist the complete model; " +
-          "inference will continue if a cache write is rejected.",
-        { availableBytes, transactionSafeBytes },
-      );
-    }
-  } catch (error) {
-    console.warn("Could not estimate model cache capacity; writes will be attempted.", error);
-  }
 }
 
 async function readCachedShard(
-  cache: ArtifactCacheSession | null,
   shard: LimiteShardManifest,
 ): Promise<Uint8Array<ArrayBuffer> | null> {
-  if (!cache) return null;
-
   try {
-    const name = shardCacheName(shard);
-    const handle = await cache.root.getFileHandle(name);
+    const root = await navigator.storage.getDirectory();
+    const handle = await root.getFileHandle(shardCacheName(shard));
     const file = await handle.getFile();
     if (file.size !== shard.byteLength) {
-      await cache.root.removeEntry(name);
+      await root.removeEntry(shardCacheName(shard));
       return null;
     }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    try {
-      await verifyShardHash(shard, bytes);
-      return bytes;
-    } catch (error) {
-      await cache.root.removeEntry(name);
-      console.warn(`Discarded corrupt cached shard ${shard.file}.`, error);
-      return null;
-    }
+    return new Uint8Array(await file.arrayBuffer());
   } catch (error) {
-    if (isDomException(error, "NotFoundError")) return null;
-    cache.writeEnabled = false;
-    console.warn("Persistent model cache read failed; using the network for this run.", error);
+    if (error instanceof DOMException && error.name === "NotFoundError") return null;
+    console.warn("Persistent model cache is unavailable; using the network cache.", error);
     return null;
   }
 }
 
-async function verifyShardHash(
-  shard: LimiteShardManifest,
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<void> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  const actual = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
-  if (actual !== shard.sha256) {
-    throw new Error(`Shard ${shard.file} failed its SHA-256 integrity check.`);
-  }
-}
-
 async function cacheShard(
-  cache: ArtifactCacheSession | null,
   shard: LimiteShardManifest,
   bytes: Uint8Array<ArrayBuffer>,
 ): Promise<void> {
-  if (!cache?.writeEnabled) return;
-
-  const name = shardCacheName(shard);
-  let writable: FileSystemWritableFileStream | null = null;
   try {
-    const handle = await cache.root.getFileHandle(name, { create: true });
-    writable = await handle.createWritable();
-    await writable.write(bytes);
-    await writable.close();
-  } catch (error) {
-    if (writable) await writable.abort().catch(() => {});
-    await removeIncompleteCachedShard(cache.root, name, shard.byteLength);
-    if (isDomException(error, "QuotaExceededError")) {
-      cache.writeEnabled = false;
-      console.warn(
-        "Model cache quota was exceeded; inference will continue without further cache writes.",
-        error,
-      );
-    } else {
-      console.warn("Could not persist this model shard; it will be fetched again next time.", error);
+    const root = await navigator.storage.getDirectory();
+    const name = shardCacheName(shard);
+    const handle = await root.getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(bytes);
+      await writable.close();
+    } catch (error) {
+      await writable.abort().catch(() => {});
+      await root.removeEntry(name).catch(() => {});
+      throw error;
     }
-  }
-}
-
-async function removeIncompleteCachedShard(
-  root: FileSystemDirectoryHandle,
-  name: string,
-  expectedBytes: number,
-): Promise<void> {
-  try {
-    const handle = await root.getFileHandle(name);
-    const file = await handle.getFile();
-    if (file.size === expectedBytes) return;
-    await root.removeEntry(name);
   } catch (error) {
-    if (!isDomException(error, "NotFoundError")) {
-      console.warn(`Could not clean up incomplete model cache entry ${name}.`, error);
-    }
+    console.warn("Could not persist this model shard; it will be fetched again next time.", error);
   }
-}
-
-function isDomException(error: unknown, name: string): boolean {
-  return error instanceof DOMException && error.name === name;
 }
 
 function immutableStorageBuffer(device: GPUDevice, bytes: Uint8Array, label: string): GPUBuffer {
@@ -856,7 +591,7 @@ function immutableStorageBuffer(device: GPUDevice, bytes: Uint8Array, label: str
 }
 
 function extractSmallTensors(
-  manifest: LimiteFullBf16Manifest,
+  manifest: LimiteQ4Manifest,
   shardIndex: number,
   shardBytes: Uint8Array,
   destination: Float32Array,
@@ -913,34 +648,6 @@ function extractSmallTensors(
     destination,
     SMALL_TENSOR_LAYOUT.biasMlp,
   );
-  copyF32(
-    manifest.tensors["runtime.gelu_bf16"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.geluByBf16,
-  );
-  copyF32(
-    manifest.tensors["runtime.silu_bf16"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.siluByBf16,
-  );
-  copyF32(
-    manifest.tensors["runtime.sigmoid_bf16"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.sigmoidByBf16,
-  );
-  copyF32(
-    manifest.tensors["runtime.sampling_weight_by_bf16"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.samplingWeightByBf16,
-  );
 }
 
 function copyF32(
@@ -982,105 +689,36 @@ function validateSource(value: unknown): void {
 
 function validateFormat(value: unknown): void {
   const format = objectAt(value, "manifest.format");
-  exactKeys(
-    format,
-    [
-      "alignment",
-      "shardMaxBytes",
-      "tiedEmbedding",
-      "valueEmbedding",
-      "bodyPrecision",
-    ],
-    "manifest.format",
-  );
+  exactKeys(format, ["alignment", "shardMaxBytes", "quantization"], "manifest.format");
   literal(format.alignment, ALIGNMENT, "manifest.format.alignment");
   literal(format.shardMaxBytes, SHARD_MAX_BYTES, "manifest.format.shardMaxBytes");
-  const tiedEmbedding = objectAt(format.tiedEmbedding, "manifest.format.tiedEmbedding");
+  const quantization = objectAt(format.quantization, "manifest.format.quantization");
   exactKeys(
-    tiedEmbedding,
-    ["dtype", "packing", "matrixLayout", "roles"],
-    "manifest.format.tiedEmbedding",
-  );
-  literal(tiedEmbedding.dtype, "bf16", "manifest.format.tiedEmbedding.dtype");
-  literal(
-    tiedEmbedding.packing,
-    "two_bf16_values_per_u32_little_endian",
-    "manifest.format.tiedEmbedding.packing",
-  );
-  literal(
-    tiedEmbedding.matrixLayout,
-    "output_major",
-    "manifest.format.tiedEmbedding.matrixLayout",
-  );
-  exactArray(
-    tiedEmbedding.roles,
-    ["token_embedding", "lm_head"],
-    "manifest.format.tiedEmbedding.roles",
-  );
-  const valueEmbedding = objectAt(format.valueEmbedding, "manifest.format.valueEmbedding");
-  exactKeys(
-    valueEmbedding,
-    ["dtype", "packing", "matrixLayout", "precision", "roles"],
-    "manifest.format.valueEmbedding",
-  );
-  literal(valueEmbedding.dtype, "bf16", "manifest.format.valueEmbedding.dtype");
-  literal(
-    valueEmbedding.packing,
-    "two_bf16_values_per_u32_little_endian",
-    "manifest.format.valueEmbedding.packing",
-  );
-  literal(
-    valueEmbedding.matrixLayout,
-    "output_major",
-    "manifest.format.valueEmbedding.matrixLayout",
-  );
-  literal(
-    valueEmbedding.precision,
-    "oracle_exact",
-    "manifest.format.valueEmbedding.precision",
-  );
-  exactArray(
-    valueEmbedding.roles,
-    ["value_embedding"],
-    "manifest.format.valueEmbedding.roles",
-  );
-  const bodyPrecision = objectAt(format.bodyPrecision, "manifest.format.bodyPrecision");
-  exactKeys(
-    bodyPrecision,
+    quantization,
     [
-      "default",
-      "exactBf16Layers",
-      "exactBf16Projections",
-      "packing",
+      "dtype",
+      "blockSize",
+      "nibbleOrder",
+      "storedValue",
+      "signedRange",
+      "scale",
+      "scaleDtype",
       "matrixLayout",
     ],
-    "manifest.format.bodyPrecision",
+    "manifest.format.quantization",
   );
+  literal(quantization.dtype, "q4_block32", "manifest.format.quantization.dtype");
+  literal(quantization.blockSize, Q4_BLOCK_SIZE, "manifest.format.quantization.blockSize");
+  literal(quantization.nibbleOrder, "low_first", "manifest.format.quantization.nibbleOrder");
   literal(
-    bodyPrecision.default,
-    "bf16",
-    "manifest.format.bodyPrecision.default",
+    quantization.storedValue,
+    "signed_plus_8",
+    "manifest.format.quantization.storedValue",
   );
-  exactArray(
-    bodyPrecision.exactBf16Layers,
-    XSA_LAYERS,
-    "manifest.format.bodyPrecision.exactBf16Layers",
-  );
-  exactArray(
-    bodyPrecision.exactBf16Projections,
-    ["qkv", "o", "gate_up", "down"],
-    "manifest.format.bodyPrecision.exactBf16Projections",
-  );
-  literal(
-    bodyPrecision.packing,
-    "two_bf16_values_per_u32_little_endian",
-    "manifest.format.bodyPrecision.packing",
-  );
-  literal(
-    bodyPrecision.matrixLayout,
-    "output_major",
-    "manifest.format.bodyPrecision.matrixLayout",
-  );
+  exactArray(quantization.signedRange, [-7, 7], "manifest.format.quantization.signedRange");
+  literal(quantization.scale, "max_abs_div_7", "manifest.format.quantization.scale");
+  literal(quantization.scaleDtype, "f16", "manifest.format.quantization.scaleDtype");
+  literal(quantization.matrixLayout, "output_major", "manifest.format.quantization.matrixLayout");
 }
 
 function validateModel(value: unknown): void {
@@ -1112,9 +750,6 @@ function validateModel(value: unknown): void {
     rope_n_pairs: 32,
     rope_style: "interleaved_pairs_odd_lane_sign_flip",
     tie_word_embeddings: true,
-    lm_head_precision_mode: "oracle_exact",
-    value_embedding_precision_mode: "oracle_exact",
-    body_precision_mode: "full_bf16_oracle_exact",
     ve_dim: HEAD_DIM,
     ve_stored_heads: KV_HEADS,
     ve_gate_channels: 12,
@@ -1151,11 +786,10 @@ function validateShard(value: unknown, index: number): LimiteShardManifest {
   const path = `manifest.shards[${index}]`;
   const shard = objectAt(value, path);
   exactKeys(shard, ["file", "url", "byteLength", "sha256"], path);
-  const expectedFile = `limite-bf16-${String(index).padStart(2, "0")}.bin`;
+  const expectedFile = `limite-q4-${String(index).padStart(2, "0")}.bin`;
   literal(shard.file, expectedFile, `${path}.file`);
   literal(shard.url, expectedFile, `${path}.url`);
   const byteLength = positiveInteger(shard.byteLength, `${path}.byteLength`);
-  literal(byteLength, EXPECTED_SHARD_BYTE_LENGTHS[index], `${path}.byteLength`);
   if (byteLength > SHARD_MAX_BYTES || byteLength % 4 !== 0) {
     fail(`${path}.byteLength must be a four-byte-aligned value no larger than ${SHARD_MAX_BYTES}`);
   }
@@ -1165,10 +799,10 @@ function validateShard(value: unknown, index: number): LimiteShardManifest {
   return shard as unknown as LimiteShardManifest;
 }
 
-function validatePackedBf16Tensor(
+function validateQ4Tensor(
   name: string,
   value: unknown,
-  expected: ExpectedPackedBf16,
+  expected: ExpectedQ4,
   shards: readonly LimiteShardManifest[],
   rangesByShard: Range[][],
 ): void {
@@ -1183,20 +817,33 @@ function validatePackedBf16Tensor(
       "byteLength",
       "dtype",
       "shape",
+      "scaleOffset",
+      "scaleOffsetWords",
+      "scaleByteLength",
+      "scaleShape",
       ...Object.keys(expected.extras),
     ],
     path,
   );
-  literal(tensor.dtype, "bf16", `${path}.dtype`);
+  literal(tensor.dtype, "q4_block32", `${path}.dtype`);
   exactArray(tensor.shape, expected.shape, `${path}.shape`);
   const [rows, columns] = expected.shape;
-  if ((rows * columns) % 2 !== 0) fail(`${path}.shape is not packed-u32 aligned`);
+  if (columns % Q4_BLOCK_SIZE !== 0) fail(`${path}.shape is not Q4 block aligned`);
+  exactArray(tensor.scaleShape, [rows, columns / Q4_BLOCK_SIZE], `${path}.scaleShape`);
+
   const shard = shardIndexAt(tensor.shard, `${path}.shard`);
   const offset = alignedOffset(tensor.offset, `${path}.offset`);
   literal(tensor.offsetWords, offset / 4, `${path}.offsetWords`);
-  const byteLength = rows * columns * 2;
+  const byteLength = rows * columns / 2;
   literal(tensor.byteLength, byteLength, `${path}.byteLength`);
-  boundedRange(shard, offset, byteLength, `${name}.bf16`, shards, rangesByShard);
+  const scaleOffset = alignedOffset(tensor.scaleOffset, `${path}.scaleOffset`);
+  if (scaleOffset < offset + byteLength) fail(`${path}.scaleOffset overlaps its quant payload`);
+  literal(tensor.scaleOffsetWords, scaleOffset / 4, `${path}.scaleOffsetWords`);
+  const scaleByteLength = rows * (columns / Q4_BLOCK_SIZE) * 2;
+  literal(tensor.scaleByteLength, scaleByteLength, `${path}.scaleByteLength`);
+  boundedRange(shard, offset, byteLength, `${name}.quants`, shards, rangesByShard);
+  boundedRange(shard, scaleOffset, scaleByteLength, `${name}.scales`, shards, rangesByShard);
+
   for (const [key, expectedValue] of Object.entries(expected.extras)) {
     exactJson(tensor[key], expectedValue, `${path}.${key}`);
   }
@@ -1254,10 +901,6 @@ function alignedOffset(value: unknown, path: string): number {
   const offset = nonNegativeInteger(value, path);
   if (offset % ALIGNMENT !== 0) fail(`${path} must be ${ALIGNMENT}-byte aligned`);
   return offset;
-}
-
-function alignOffset(value: number): number {
-  return Math.ceil(value / ALIGNMENT) * ALIGNMENT;
 }
 
 function objectAt(value: unknown, path: string): Record<string, unknown> {
@@ -1364,5 +1007,5 @@ function deepFreeze<T>(value: T): T {
 }
 
 function fail(message: string): never {
-  throw new Error(`Invalid Limite full-BF16 manifest: ${message}.`);
+  throw new Error(`Invalid Limite Q4 manifest: ${message}.`);
 }
