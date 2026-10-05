@@ -1,8 +1,10 @@
+import { LimiteWebGpuEngine } from "./limite-engine/engine";
 import {
   LIMITE_CONTEXT_TOKENS,
+  LIMITE_DECODE_BATCH_SIZE,
+  LIMITE_MAX_SOLVE_MS,
   LIMITE_TOKENIZER_URL,
-  LimiteWebGpuEngine,
-} from "./limite-engine/engine";
+} from "./limite-config";
 import { hasCompleteFinalBox } from "./boxed-answer";
 import type {
   CompletionReason,
@@ -12,7 +14,6 @@ import type {
 import { ViolettoTokenizer } from "./tokenizer";
 
 const RENDER_INTERVAL_MS = 250;
-const MAX_SOLVE_MS = 120_000;
 
 type GenerationResult = {
   readonly text: string;
@@ -112,7 +113,7 @@ async function solve(
       first,
       outputBudget,
       firstTokenAt,
-      runStarted + MAX_SOLVE_MS,
+      runStarted + LIMITE_MAX_SOLVE_MS,
     );
     timings.totalMs = performance.now() - runStarted;
     const speed =
@@ -214,7 +215,7 @@ async function generate(
     }
     pending = await activeEngine.decodeBatch(
       sampled[sampled.length - 1],
-      Math.min(4, remaining),
+      Math.min(LIMITE_DECODE_BATCH_SIZE, remaining),
     );
   }
 

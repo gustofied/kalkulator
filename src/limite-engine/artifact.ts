@@ -1,5 +1,4 @@
-export const PINNED_Q4_MANIFEST_URL =
-  "https://huggingface.co/gustofied/kalkulator/resolve/f66f2e77b2bfd4e8aa80e0770943c3c0d3414f18/webgpu-q4-v2/manifest.json" as const;
+import { LIMITE_MANIFEST_URL } from "../limite-config";
 
 const MANIFEST_VERSION = 1;
 const SHARD_COUNT = 6;
@@ -137,7 +136,6 @@ export type LimiteSmallTensorManifest = LimiteTensorBase & {
 };
 
 export type LimiteTensorManifest = LimiteQ4TensorManifest | LimiteSmallTensorManifest;
-export type Q4TensorEntry = LimiteQ4TensorManifest;
 
 export type LimiteQ4Manifest = {
   readonly version: 1;
@@ -155,9 +153,6 @@ export type LimiteArtifactProgress =
       readonly source: "cache" | "network";
       readonly loadedBytes: number;
       readonly totalBytes: number;
-      readonly shardIndex: number;
-      readonly shardLoadedBytes: number;
-      readonly shardByteLength: number;
     };
 
 export type LimiteArtifactProgressCallback = (progress: LimiteArtifactProgress) => void;
@@ -186,23 +181,6 @@ export const SMALL_TENSOR_LAYOUT = {
   dense2Mlp: MUDD_DENSE2_MLP_OFFSET,
   bias: MUDD_BIAS_OFFSET,
   biasMlp: MUDD_BIAS_MLP_OFFSET,
-} as const;
-
-/** Shapes and row-major strides for the f32 arena addressed by SMALL_TENSOR_LAYOUT. */
-export const SMALL_TENSOR_METADATA = {
-  elementLength: SMALL_TENSOR_ELEMENTS,
-  byteLength: SMALL_TENSOR_ELEMENTS * Float32Array.BYTES_PER_ELEMENT,
-  xsa: { shape: [LAYER_COUNT, QUERY_HEADS], strides: [QUERY_HEADS, 1], length: XSA_LENGTH },
-  lambdas: { shape: [LAYER_COUNT, 4], strides: [4, 1], length: LAMBDAS_LENGTH },
-  dense1: { shape: [32, HIDDEN_SIZE], strides: [HIDDEN_SIZE, 1], length: MUDD_DENSE1_LENGTH },
-  dense2: { shape: [LAYER_COUNT, 3, 32], strides: [96, 32, 1], length: MUDD_DENSE2_LENGTH },
-  dense2Mlp: {
-    shape: [LAYER_COUNT, 3, 32],
-    strides: [96, 32, 1],
-    length: MUDD_DENSE2_MLP_LENGTH,
-  },
-  bias: { shape: [LAYER_COUNT, 3], strides: [3, 1], length: MUDD_BIAS_LENGTH },
-  biasMlp: { shape: [LAYER_COUNT, 3], strides: [3, 1], length: MUDD_BIAS_MLP_LENGTH },
 } as const;
 
 export type LoadedLimiteQ4Artifact = {
@@ -375,7 +353,7 @@ export async function loadLimiteQ4Artifact(
   onProgress: LimiteArtifactProgressCallback = () => {},
 ): Promise<LoadedLimiteQ4Artifact> {
   onProgress({ phase: "manifest" });
-  const manifestResponse = await fetch(PINNED_Q4_MANIFEST_URL, { cache: "force-cache" });
+  const manifestResponse = await fetch(LIMITE_MANIFEST_URL, { cache: "force-cache" });
   if (!manifestResponse.ok) {
     throw new Error(
       `Could not fetch Limite Q4 manifest (${manifestResponse.status} ${manifestResponse.statusText}).`,
@@ -384,14 +362,14 @@ export async function loadLimiteQ4Artifact(
   const manifest = validateLimiteQ4Manifest(await manifestResponse.json());
   await removeStaleCachedShards(manifest.shards);
   const totalBytes = manifest.shards.reduce((total, shard) => total + shard.byteLength, 0);
-  const smallValues = new Float32Array(SMALL_TENSOR_METADATA.elementLength);
+  const smallValues = new Float32Array(SMALL_TENSOR_ELEMENTS);
   const shards: GPUBuffer[] = [];
   let loadedBytes = 0;
 
   try {
     for (let shardIndex = 0; shardIndex < manifest.shards.length; shardIndex++) {
       const shard = manifest.shards[shardIndex];
-      const url = new URL(shard.url, PINNED_Q4_MANIFEST_URL).href;
+      const url = new URL(shard.url, LIMITE_MANIFEST_URL).href;
       const bytes = await fetchShard(
         url,
         shard,
@@ -448,9 +426,6 @@ async function fetchShard(
       source: "cache",
       loadedBytes: previousBytes + cached.byteLength,
       totalBytes,
-      shardIndex,
-      shardLoadedBytes: cached.byteLength,
-      shardByteLength: shard.byteLength,
     });
     return cached;
   }
@@ -478,9 +453,6 @@ async function fetchShard(
     source: "network",
     loadedBytes: previousBytes,
     totalBytes,
-    shardIndex,
-    shardLoadedBytes: 0,
-    shardByteLength: shard.byteLength,
   });
 
   while (true) {
@@ -497,9 +469,6 @@ async function fetchShard(
       source: "network",
       loadedBytes: previousBytes + offset,
       totalBytes,
-      shardIndex,
-      shardLoadedBytes: offset,
-      shardByteLength: shard.byteLength,
     });
   }
 

@@ -17,7 +17,7 @@ export const Q4_32_MATVEC_ROWS_PER_GROUP = 4;
  *
  * Bindings:
  *   0: packed codes and scales in one array<u32>
- *   1: packed f16 input vector
+ *   1: f32 input vector
  *   2: f32 output vector
  *   3: Q4MatVecParams uniform (16 bytes)
  *

@@ -4,6 +4,7 @@ import { Flip } from "gsap/Flip";
 import katex from "katex";
 
 import { findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
+import { LIMITE_WATCHDOG_MS } from "./limite-config";
 import {
   type CompletionReason,
   type InferenceRequest,
@@ -118,7 +119,7 @@ form.addEventListener("submit", (event) => {
     activity.textContent = `Working · ${seconds}s`;
     // The worker enforces the normal two-minute budget. This also recovers
     // the interface if a GPU operation never resolves.
-    if (seconds >= 150) {
+    if (performance.now() - solveStarted >= LIMITE_WATCHDOG_MS) {
       worker.terminate();
       requireReload("The calculation stopped responding. Reload to try again.");
     }

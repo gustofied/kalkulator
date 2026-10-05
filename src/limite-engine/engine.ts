@@ -1,4 +1,11 @@
 import {
+  LIMITE_CONTEXT_TOKENS,
+  LIMITE_DECODE_BATCH_SIZE as DECODE_BATCH_SIZE,
+  LIMITE_TEMPERATURE,
+  LIMITE_TOKENIZER_VOCAB_SIZE,
+  LIMITE_TOP_P,
+} from "../limite-config";
+import {
   loadLimiteQ4Artifact,
   type LimiteArtifactProgressCallback,
   type LoadedLimiteQ4Artifact,
@@ -24,7 +31,6 @@ import {
 } from "./ops";
 import {
   GPU_TOP_P_SAMPLER_WGSL,
-  LIMITE_TOKENIZER_VOCAB_SIZE,
   SAMPLER_ENTRIES_PER_PARTITION,
   SAMPLER_WORKGROUP_SIZE,
 } from "./sampler";
@@ -40,10 +46,6 @@ import {
   RMS_NORM_F32_WGSL,
 } from "./shaders";
 
-export const LIMITE_CONTEXT_TOKENS = 16_384;
-export const LIMITE_TOKENIZER_URL =
-  "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/b1f3d572ccacb6919f4d64c321b70ba034ddaef2/tokenizer.json";
-
 const LAYER_COUNT = 48;
 const KV_WIDTH = LIMITE_KV_HEADS * LIMITE_HEAD_DIM;
 const QKV_OUTPUT_SIZE =
@@ -53,7 +55,6 @@ const VALUE_LAYERS = new Set(Array.from({ length: 16 }, (_, index) => index * 3 
 const MAX_ATTENTION_PARTITIONS = Math.ceil(LIMITE_CONTEXT_TOKENS / ATTENTION_PARTITION_KEYS);
 const SAMPLER_PARTITIONS = Math.ceil(LIMITE_TOKENIZER_VOCAB_SIZE / SAMPLER_WORKGROUP_SIZE);
 const SAMPLER_CANDIDATES = SAMPLER_PARTITIONS * SAMPLER_ENTRIES_PER_PARTITION;
-const DECODE_BATCH_SIZE = 4;
 const PARAMETER_BLOCK_BYTES = 256;
 const PARAMETER_LAYER_BYTES = PARAMETER_BLOCK_BYTES * 2;
 const PARAMETER_SLOT_BYTES = LAYER_COUNT * PARAMETER_LAYER_BYTES;
@@ -1023,8 +1024,8 @@ function samplerParams(device: GPUDevice): GPUBuffer {
   view.setUint32(0, LIMITE_TOKENIZER_VOCAB_SIZE, true);
   view.setUint32(12, SAMPLER_CANDIDATES, true);
   view.setUint32(24, SAMPLER_PARTITIONS, true);
-  view.setFloat32(32, 0.6, true);
-  view.setFloat32(36, 0.95, true);
+  view.setFloat32(32, LIMITE_TEMPERATURE, true);
+  view.setFloat32(36, LIMITE_TOP_P, true);
   return immutableUniform(device, new Uint8Array(bytes), "Limite sampler parameters");
 }
 

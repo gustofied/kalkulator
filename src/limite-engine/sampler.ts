@@ -1,4 +1,4 @@
-export const LIMITE_TOKENIZER_VOCAB_SIZE = 151_667;
+import { LIMITE_EOS_TOKEN, LIMITE_TOKENIZER_VOCAB_SIZE } from "../limite-config";
 
 export const SAMPLER_WORKGROUP_SIZE = 256;
 export const SAMPLER_ENTRIES_PER_PARTITION = SAMPLER_WORKGROUP_SIZE;
@@ -41,7 +41,7 @@ export const GPU_TOP_P_SAMPLER_WGSL = /* wgsl */ `
 const WORKGROUP_SIZE = ${SAMPLER_WORKGROUP_SIZE}u;
 const PARTITION_SIZE = ${SAMPLER_ENTRIES_PER_PARTITION}u;
 const NEGATIVE_INFINITY = -3.402823e38f;
-const EOS_TOKEN = 151643u;
+const EOS_TOKEN = ${LIMITE_EOS_TOKEN}u;
 
 struct SamplerParams {
   vocab_size: u32,

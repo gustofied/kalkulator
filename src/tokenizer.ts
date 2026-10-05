@@ -1,4 +1,5 @@
 import { tokenizers } from "@jax-js/loaders";
+import { LIMITE_EOS_TOKEN } from "./limite-config";
 
 type AddedToken = { id: number; content: string; special: boolean };
 type TokenizerData = {
@@ -14,7 +15,7 @@ type TokenizerData = {
 };
 
 export class ViolettoTokenizer {
-  readonly eosToken = 151643;
+  readonly eosToken = LIMITE_EOS_TOKEN;
   readonly #encoding: tokenizers.BpeEncoding;
 
   constructor(data: TokenizerData) {

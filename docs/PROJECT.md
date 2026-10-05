@@ -16,6 +16,8 @@ Run Paradigma's Violetto Limite 1B mathematics model entirely in a WebGPU browse
 
 There is no production JAX.js path, runtime probe, A/B switch, or fallback engine. [`src/model.ts`](../src/model.ts) remains the JAX.js reference implementation and architecture oracle.
 
+[`src/limite-config.ts`](../src/limite-config.ts) is the single serving policy: pinned Q4 artifact and tokenizer, context, sampling, batch size, and time limits. It has no URL parameters, model selector, or runtime overrides. JAX.js is a development dependency for the reference; only its loader package's tokenizer utility is used by the app.
+
 ## Pinned model contract
 
 The converter and loader accept one upstream checkpoint:
@@ -30,6 +32,8 @@ The production manifest is pinned to the immutable Hugging Face commit `f66f2e77
 The model contract is 48 layers with hidden size 1,280, intermediate size 3,328, 10 query heads, 2 key/value heads, and head dimension 128. Local attention retains the current token plus 1,024 preceding tokens; layers 3, 7, …, 47 use global attention. RoPE covers the first 64 dimensions of each head with base 1,024. Value embeddings occur on layers 1, 4, …, 46, XSA is used on every layer, MUDD mixing occurs at layers 24 and 47, and the token embedding is tied to the vocabulary head. Logits use Paradigma's soft cap `23 * sigmoid((raw + 5) / 7.5)`.
 
 The browser artifact uses symmetric `q4_block32` weights with FP16 scales and FP32 control tensors. Conversion fuses Q/K/V and gate/up matrices, folds the published projection scales, and stores the XSA coefficients after `tanh`, matching the reference computation.
+
+`scripts/pack-limite-q4.py` is the offline reproducible packer for this artifact, not part of deployment or inference. It requires explicit `--input` and `--output` paths and refuses to overwrite an existing output directory.
 
 ## Prompt and generation contract
 

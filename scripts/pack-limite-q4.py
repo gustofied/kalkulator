@@ -13,7 +13,6 @@ import hashlib
 import json
 import math
 import mmap
-import shutil
 import struct
 import sys
 import time
@@ -27,8 +26,6 @@ SOURCE_REPO = "paradigma-inc/limite-1b-violetto"
 SOURCE_REVISION = "b1f3d572ccacb6919f4d64c321b70ba034ddaef2"
 SOURCE_SHA256 = "9dc7e89e30acf473629f98ac3ade535fb05cc044fe7e399b78d0bc957283a5f5"
 CONFIG_SHA256 = "d080b1f7a04a44c44cb0deb1d3fcb7ce99212fce5573f5e15b74b7f84b74463d"
-DEFAULT_INPUT = Path("/tmp/limite-official/model.safetensors")
-DEFAULT_OUTPUT = Path("/tmp/limite-q4")
 ALIGNMENT = 256
 BLOCK_SIZE = 32
 SHARD_MAX_BYTES = 112 * 1024 * 1024
@@ -319,10 +316,9 @@ def q4_raw(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chunk-rows", type=int, default=512)
-    parser.add_argument("--force", action="store_true", help="Replace an existing output directory")
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -355,12 +351,7 @@ def main() -> int:
     value_gate_channels = int(config["ve_gate_channels"])
 
     if output_path.exists():
-        if not args.force:
-            raise FileExistsError(f"Output already exists: {output_path}; pass --force to replace it")
-        if output_path.is_dir():
-            shutil.rmtree(output_path)
-        else:
-            output_path.unlink()
+        raise FileExistsError(f"Output already exists: {output_path}; choose a new directory")
     output_path.mkdir(parents=True)
 
     writer = ShardWriter(output_path, SHARD_MAX_BYTES)
