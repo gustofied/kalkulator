@@ -8,7 +8,6 @@ import {
   ATTENTION_PARTIAL_STRIDE,
   ATTENTION_PARTITION_KEYS,
   ELEMENTWISE_WORKGROUP_SIZE,
-  GPU_TOP_K_TOP_P_SAMPLER_WGSL,
   GQA_ATTENTION_WGSL,
   LIMITE_HEAD_DIM,
   LIMITE_HIDDEN_SIZE,
@@ -21,10 +20,14 @@ import {
   Q4_32_EMBEDDING_WGSL,
   Q4_32_EMBED_WORKGROUP_SIZE,
   QKV_POSTPROCESS_WGSL,
-  SAMPLER_CANDIDATES_PER_PARTITION,
-  SAMPLER_WORKGROUP_SIZE,
   SWIGLU_WGSL,
 } from "./ops";
+import {
+  GPU_TOP_P_SAMPLER_WGSL,
+  LIMITE_TOKENIZER_VOCAB_SIZE,
+  SAMPLER_ENTRIES_PER_PARTITION,
+  SAMPLER_WORKGROUP_SIZE,
+} from "./sampler";
 import {
   COPY_VECTOR_WGSL,
   MIX_AND_NORM_WGSL,
@@ -37,7 +40,7 @@ import {
   RMS_NORM_F32_WGSL,
 } from "./shaders";
 
-export const LIMITE_CONTEXT_TOKENS = 4_096;
+export const LIMITE_CONTEXT_TOKENS = 16_384;
 export const LIMITE_TOKENIZER_URL =
   "https://huggingface.co/paradigma-inc/limite-1b-violetto/resolve/b1f3d572ccacb6919f4d64c321b70ba034ddaef2/tokenizer.json";
 
@@ -48,8 +51,8 @@ const QKV_OUTPUT_SIZE =
 const GLOBAL_LAYERS = new Set(Array.from({ length: 12 }, (_, index) => index * 4 + 3));
 const VALUE_LAYERS = new Set(Array.from({ length: 16 }, (_, index) => index * 3 + 1));
 const MAX_ATTENTION_PARTITIONS = Math.ceil(LIMITE_CONTEXT_TOKENS / ATTENTION_PARTITION_KEYS);
-const SAMPLER_PARTITIONS = Math.ceil(LIMITE_VOCAB_SIZE / SAMPLER_WORKGROUP_SIZE);
-const SAMPLER_CANDIDATES = SAMPLER_PARTITIONS * SAMPLER_CANDIDATES_PER_PARTITION;
+const SAMPLER_PARTITIONS = Math.ceil(LIMITE_TOKENIZER_VOCAB_SIZE / SAMPLER_WORKGROUP_SIZE);
+const SAMPLER_CANDIDATES = SAMPLER_PARTITIONS * SAMPLER_ENTRIES_PER_PARTITION;
 const DECODE_BATCH_SIZE = 4;
 const PARAMETER_BLOCK_BYTES = 256;
 const PARAMETER_LAYER_BYTES = PARAMETER_BLOCK_BYTES * 2;
@@ -126,6 +129,7 @@ type Scratch = {
   readonly logits: GPUBuffer;
   readonly candidateValues: GPUBuffer;
   readonly candidateIds: GPUBuffer;
+  readonly prefixMasses: GPUBuffer;
 };
 
 type StaticBindings = {
@@ -478,7 +482,7 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
     swiglu: device.createShaderModule({ label: "Limite SwiGLU", code: SWIGLU_WGSL }),
     copy: device.createShaderModule({ label: "Limite vector copy", code: COPY_VECTOR_WGSL }),
     mudd: device.createShaderModule({ label: "Limite MUDD", code: MUDD_WGSL }),
-    sampler: device.createShaderModule({ label: "Limite sampler", code: GPU_TOP_K_TOP_P_SAMPLER_WGSL }),
+    sampler: device.createShaderModule({ label: "Limite sampler", code: GPU_TOP_P_SAMPLER_WGSL }),
   };
   const compilation = await Promise.all(
     Object.entries(modules).map(async ([name, module]) => ({ name, info: await module.getCompilationInfo() })),
@@ -516,8 +520,8 @@ async function createPipelines(device: GPUDevice): Promise<Pipelines> {
     pipeline("Limite SwiGLU", modules.swiglu, "swiglu"),
     pipeline("Limite vector copy", modules.copy, "copy_vector"),
     pipeline("Limite MUDD", modules.mudd, "mudd"),
-    pipeline("Limite sampler partitions", modules.sampler, "sample_partitions"),
-    pipeline("Limite sampler final", modules.sampler, "sample_top_50"),
+    pipeline("Limite sampler partitions", modules.sampler, "prepare_nucleus_partitions"),
+    pipeline("Limite sampler final", modules.sampler, "sample_nucleus"),
   ]);
   return {
     embedding,
@@ -572,6 +576,7 @@ function createScratch(device: GPUDevice): Scratch {
     logits: storage("Limite logits", LIMITE_VOCAB_SIZE),
     candidateValues: storage("Limite sampler candidate values", SAMPLER_CANDIDATES),
     candidateIds: storage("Limite sampler candidate ids", SAMPLER_CANDIDATES),
+    prefixMasses: storage("Limite sampler prefix masses", SAMPLER_CANDIDATES),
   };
 }
 
@@ -810,7 +815,8 @@ function createBindings(
       storageEntry(0, scratch.logits),
       storageEntry(1, scratch.candidateValues),
       storageEntry(2, scratch.candidateIds),
-      uniformEntry(5, samplerParamsBuffer),
+      storageEntry(3, scratch.prefixMasses),
+      uniformEntry(6, samplerParamsBuffer),
     ],
   });
   const samplerTop = device.createBindGroup({
@@ -819,9 +825,10 @@ function createBindings(
     entries: [
       storageEntry(1, scratch.candidateValues),
       storageEntry(2, scratch.candidateIds),
-      storageEntry(3, scratch.token),
-      storageEntry(4, scratch.rng),
-      uniformEntry(5, samplerParamsBuffer),
+      storageEntry(3, scratch.prefixMasses),
+      storageEntry(4, scratch.token),
+      storageEntry(5, scratch.rng),
+      uniformEntry(6, samplerParamsBuffer),
     ],
   });
 
@@ -1013,7 +1020,7 @@ function muddBindGroup(
 function samplerParams(device: GPUDevice): GPUBuffer {
   const bytes = new ArrayBuffer(48);
   const view = new DataView(bytes);
-  view.setUint32(0, LIMITE_VOCAB_SIZE, true);
+  view.setUint32(0, LIMITE_TOKENIZER_VOCAB_SIZE, true);
   view.setUint32(12, SAMPLER_CANDIDATES, true);
   view.setUint32(24, SAMPLER_PARTITIONS, true);
   view.setFloat32(32, 0.6, true);

@@ -1,4 +1,4 @@
-export type CompletionReason = "boxed" | "eos" | "limit" | "cancelled";
+export type CompletionReason = "boxed" | "eos" | "limit" | "time" | "cancelled";
 
 export type RunTimings = {
   deviceMs?: number;

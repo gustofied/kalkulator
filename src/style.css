@@ -85,6 +85,19 @@ main {
 
 #prompt-form.solving { opacity: 0.62; }
 
+.activity {
+  position: absolute;
+  bottom: 24px;
+  left: 0;
+  width: 100%;
+  margin: 0;
+  color: var(--violet);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .prompt-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

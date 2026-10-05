@@ -20,6 +20,7 @@ const prompt = document.querySelector<HTMLInputElement>("#prompt")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const hint = document.querySelector<HTMLElement>("#hint")!;
+const activity = document.querySelector<HTMLElement>("#activity")!;
 const answerSection = document.querySelector<HTMLElement>("#answer-section")!;
 const copyFlow = document.querySelector<HTMLElement>("#copy-flow")!;
 const answerArt = document.querySelector<HTMLElement>("#answer-art")!;
@@ -50,6 +51,9 @@ let solving = false;
 let nextRunId = 1;
 let activeRunId: number | null = null;
 let activeRawText = "";
+let solveStarted = 0;
+let activityTimer: number | null = null;
+let reloadRequired = false;
 let finalRevealed = false;
 let modelReady = false;
 let introTimeline: gsap.core.Timeline | null = null;
@@ -93,6 +97,10 @@ prompt.addEventListener("input", () => {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (reloadRequired) {
+    window.location.reload();
+    return;
+  }
   if (!modelReady || solving) return;
 
   const displayedProblem = prompt.value.trim();
@@ -103,6 +111,18 @@ form.addEventListener("submit", (event) => {
       : displayedProblem;
   const runId = nextRunId++;
   solving = true;
+  solveStarted = performance.now();
+  activity.textContent = "Working";
+  activityTimer = window.setInterval(() => {
+    const seconds = Math.floor((performance.now() - solveStarted) / 1000);
+    activity.textContent = `Working · ${seconds}s`;
+    // The worker enforces the normal two-minute budget. This also recovers
+    // the interface if a GPU operation never resolves.
+    if (seconds >= 150) {
+      worker.terminate();
+      requireReload("The calculation stopped responding. Reload to try again.");
+    }
+  }, 1000);
   activeRunId = runId;
   activeRawText = "";
   answerSection.setAttribute("aria-busy", "true");
@@ -134,6 +154,7 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     modelReady = true;
     setStatus("ready");
     hint.textContent = "Ready";
+    activity.textContent = "Ready · runs on your device";
     revealPrompt();
     console.info(`[Kalkulator] ready ${JSON.stringify(message.timings)}`);
     return;
@@ -142,7 +163,13 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
   if (message.type === "status") {
     if (message.runId !== undefined && message.runId !== activeRunId) return;
     logPreparation(message.status, message.progress);
-    if (!modelReady) return;
+    if (!modelReady) {
+      const action = message.status.startsWith("downloading") ? "Downloading" : "Preparing";
+      activity.textContent = message.progress === undefined
+        ? "Preparing your notebook"
+        : `${action} · ${Math.round(message.progress * 100)}%`;
+      return;
+    }
     setStatus(message.status);
     if (message.progress !== undefined) {
       hint.textContent = `${Math.round(message.progress * 100)}%`;
@@ -173,7 +200,11 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     answerSection.classList.remove("reasoning", "writing");
     const finalStatus = hasBoxedAnswer ? "answer complete" : "no answer";
     setStatus(finalStatus);
-    hint.textContent = completionHint(message.reason, message.timings.prefillMs);
+    hint.textContent = completionHint(message.reason);
+    const seconds = ((performance.now() - solveStarted) / 1000).toFixed(1);
+    activity.textContent = hasBoxedAnswer
+      ? `Finished · ${seconds}s · on your device`
+      : completionHint(message.reason);
     const metrics = {
       tokens: message.tokens,
       tokensPerSecond: Number(message.speed.toFixed(2)),
@@ -199,6 +230,11 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
 
   if (message.runId !== undefined && message.runId !== activeRunId) return;
   console.error("[Kalkulator] preparation or inference failed", message.message);
+  activity.textContent = "Could not finish";
+  if (!modelReady) {
+    requireReload(message.message);
+    return;
+  }
   stopPreparationIntro();
   stopWorkingMotion();
 
@@ -211,16 +247,33 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
 
 worker.addEventListener("error", (event) => {
   console.error("[Kalkulator] inference worker failed", event.error ?? event.message);
+  requireReload("The notebook could not start. Reload to try again.");
+});
+
+function requireReload(message: string): void {
+  modelReady = false;
+  reloadRequired = true;
   stopPreparationIntro();
   stopWorkingMotion();
+  stopWorkWriter();
   revealAnswerLayout();
-  showAnswerMessage(event.message || "Inference worker failed.");
+  showAnswerMessage(message);
   setStatus("error");
   finishRun(activeRunId ?? undefined);
-});
+  form.classList.remove("preparing");
+  form.setAttribute("aria-hidden", "false");
+  gsap.set(form, { autoAlpha: 1 });
+  run.textContent = "reload";
+  run.disabled = false;
+  prompt.required = false;
+  activity.textContent = "Reload to try again";
+}
 
 function finishRun(runId?: number): void {
   if (runId !== undefined && activeRunId !== runId) return;
+  stopWorkWriter();
+  if (activityTimer !== null) window.clearInterval(activityTimer);
+  activityTimer = null;
   solving = false;
   activeRunId = null;
   activeRawText = "";
@@ -234,7 +287,9 @@ function finishRun(runId?: number): void {
 function failureMessage(reason: CompletionReason): string {
   switch (reason) {
     case "limit":
-      return "Violetto did not return a boxed final answer.";
+      return "No final answer within the available space. Try a simpler problem.";
+    case "time":
+      return "No final answer after two minutes. You can try again or simplify the problem.";
     case "eos":
       return "Violetto stopped before returning a boxed final answer.";
     case "cancelled":
@@ -244,21 +299,18 @@ function failureMessage(reason: CompletionReason): string {
   }
 }
 
-function completionHint(
-  reason: CompletionReason,
-  prefillMs: number | undefined,
-): string {
+function completionHint(reason: CompletionReason): string {
   switch (reason) {
     case "limit":
-      return "No boxed answer";
+      return "Space limit reached";
+    case "time":
+      return "Time limit reached";
     case "eos":
       return "Stopped before boxed answer";
     case "cancelled":
       return "Cancelled";
     case "boxed":
-      return prefillMs
-        ? `Prefill ${(prefillMs / 1000).toFixed(1)}s`
-        : "Ready for another problem.";
+      return "Ready for another problem.";
   }
 }
 
@@ -596,36 +648,20 @@ function splitOutput(rawText: string): {
     return { reasoning: "", answer: "", thinking: true };
   }
 
-  const start = rawText.indexOf("<think>");
-  if (start < 0) {
-    const box = findLastBoxedAnswer(rawText);
-    if (box && hasCompleteFinalBox(rawText)) {
-      const boxedExpression = rawText.slice(box.commandStart, box.closeBrace + 1);
-      const reasoning = rawText
-        .slice(0, box.commandStart)
-        .replace(/(?:\\\[|\\\(|\$\$?)\s*$/, "");
-      return {
-        reasoning,
-        answer: `\\(${boxedExpression}\\)`,
-        thinking: false,
-      };
-    }
-    return { reasoning: rawText, answer: "", thinking: true };
-  }
-  const contentStart = start + "<think>".length;
-  const end = rawText.indexOf("</think>", contentStart);
-  if (end < 0) {
-    const openThinking = rawText.slice(contentStart);
+  const clean = (text: string) => text.replace(/<\/?think>/g, "").replace(/<\/?think[^>]*$/, "");
+  const box = findLastBoxedAnswer(rawText);
+  if (box && hasCompleteFinalBox(rawText)) {
     return {
-      reasoning: openThinking.replace(/<\/?think[^>]*$/, ""),
-      answer: "",
-      thinking: true,
+      reasoning: clean(rawText.slice(0, box.commandStart))
+        .replace(/(?:\\\[|\\\(|\$\$?)\s*$/, ""),
+      answer: `\\(${rawText.slice(box.commandStart, box.closeBrace + 1)}\\)`,
+      thinking: false,
     };
   }
   return {
-    reasoning: rawText.slice(contentStart, end),
-    answer: rawText.slice(end + "</think>".length).trimStart(),
-    thinking: false,
+    reasoning: clean(rawText),
+    answer: "",
+    thinking: true,
   };
 }
 

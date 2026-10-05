@@ -12,6 +12,7 @@ import type {
 import { ViolettoTokenizer } from "./tokenizer";
 
 const RENDER_INTERVAL_MS = 250;
+const MAX_SOLVE_MS = 120_000;
 
 type GenerationResult = {
   readonly text: string;
@@ -111,6 +112,7 @@ async function solve(
       first,
       outputBudget,
       firstTokenAt,
+      runStarted + MAX_SOLVE_MS,
     );
     timings.totalMs = performance.now() - runStarted;
     const speed =
@@ -138,6 +140,7 @@ async function generate(
   first: number,
   outputBudget: number,
   firstTokenAt: number,
+  deadline: number,
 ): Promise<GenerationResult> {
   const sampled: number[] = [];
   const decoder = activeTokenizer.createDecoder();
@@ -205,6 +208,10 @@ async function generate(
 
     const remaining = tokenLimit - sampled.length;
     if (remaining <= 0) break;
+    if (performance.now() >= deadline) {
+      reason = "time";
+      break;
+    }
     pending = await activeEngine.decodeBatch(
       sampled[sampled.length - 1],
       Math.min(4, remaining),

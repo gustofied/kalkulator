@@ -44,15 +44,19 @@ Please reason step by step, and put your final answer within \boxed{}.<|im_end|>
 <|im_start|>assistant
 ```
 
-Generation uses temperature 0.6, top-p 0.95, and top-k 50 on the GPU. Token ID 151643 is BOS, EOS, and PAD; `<|im_end|>` is not treated as EOS.
+Generation uses temperature 0.6 and full-vocabulary top-p 0.95 on the GPU, without a top-k cutoff. Only the 151,667 tokenizer IDs are eligible; the 13 padded model rows are excluded. `src/limite-engine/sampler.ts` contains the single production sampler. Token ID 151643 is BOS, EOS, and PAD; `<|im_end|>` is not treated as EOS.
 
-The runtime has a 4,096-token working context. The maximum output is the unused portion after the formatted prompt. Generation ends on EOS, when the context is full, or after a complete balanced `\boxed{...}` answer. If the model emits `<think>`, the box is accepted only after `</think>`; when the answer is inside `\[...\]` or `\(...\)`, the closing math delimiter is retained before stopping.
+The runtime has a 16,384-token working context. The maximum output is the unused portion after the formatted prompt. Generation ends on EOS, when the context is full, after two minutes of solve time (checked between decode batches), or after a complete balanced `\boxed{...}` answer. A separate 150-second UI watchdog terminates an unresponsive worker and offers a reload. There are no automatic retries or answer-forcing passes. If the model emits `<think>`, the box is accepted only after `</think>`; enclosing math delimiters are retained before stopping.
+
+All working text stays in the six-line scrolling area. Only the completed boxed answer is printed beneath it. Completion flushes the visual writer, and the interface exposes preparation progress, elapsed solve time, and an explicit limit or error state.
 
 ## Loading and performance
 
-The first visit downloads about 556 MiB of model data. Successful shards are cached in OPFS, stale artifact shards are removed, and later visits load the pinned artifact locally. The browser still has to read the cached bytes, create GPU buffers, and compile pipelines on each page load. Private browsing, cleared site data, or insufficient storage quota can prevent persistence.
+The first visit downloads about 556 MiB of model data. Successful shards are cached in OPFS, stale artifact shards are removed, and later visits load the pinned artifact locally. Every downloaded or cached shard is checked against its manifest SHA-256; damaged cache entries are replaced. The browser still has to read the cached bytes, create GPU buffers, and compile pipelines on each page load. Private browsing, cleared site data, or insufficient storage quota can prevent persistence. The 16K FP32 attention cache uses about 456 MiB in addition to the weights and scratch buffers.
 
-A valid local WebGPU run on the current test browser and hardware reached 56.78 generated tokens/second and returned the correct boxed answer. This is a spot measurement, not a portable benchmark; performance depends on the GPU, browser, thermals, prompt length, and generated sequence length.
+A valid local WebGPU run of this candidate reached 53.63 generated tokens/second and returned the correct boxed answer to `17 + 25` in 5.80 seconds. This is a spot measurement, not a portable benchmark; performance depends on the GPU, browser, thermals, prompt length, and generated sequence length.
+
+See [RESULTS.md](RESULTS.md) for dated checks and unresolved answer-quality limits. A working browser runtime is not evidence that all Paradigma blog problems are solved reliably.
 
 ## Deployment invariants
 

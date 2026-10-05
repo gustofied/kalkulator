@@ -506,6 +506,9 @@ async function fetchShard(
   if (offset !== shard.byteLength) {
     throw new Error(`Shard ${shard.file} is ${offset} bytes; expected ${shard.byteLength}.`);
   }
+  if (!(await shardMatchesHash(shard, bytes))) {
+    throw new Error(`Model download is damaged (${shard.file}). Reload to try again.`);
+  }
   await cacheShard(shard, bytes);
   return bytes;
 }
@@ -545,7 +548,13 @@ async function readCachedShard(
       await root.removeEntry(shardCacheName(shard));
       return null;
     }
-    return new Uint8Array(await file.arrayBuffer());
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!(await shardMatchesHash(shard, bytes))) {
+      await root.removeEntry(shardCacheName(shard));
+      console.warn(`Replacing damaged cached model shard ${shard.file}.`);
+      return null;
+    }
+    return bytes;
   } catch (error) {
     if (error instanceof DOMException && error.name === "NotFoundError") return null;
     console.warn("Persistent model cache is unavailable; using the network cache.", error);
@@ -573,6 +582,15 @@ async function cacheShard(
   } catch (error) {
     console.warn("Could not persist this model shard; it will be fetched again next time.", error);
   }
+}
+
+async function shardMatchesHash(
+  shard: LimiteShardManifest,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<boolean> {
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(hash), value => value.toString(16).padStart(2, "0")).join("");
+  return hex === shard.sha256;
 }
 
 function immutableStorageBuffer(device: GPUDevice, bytes: Uint8Array, label: string): GPUBuffer {
