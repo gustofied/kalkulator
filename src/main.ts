@@ -116,7 +116,7 @@ form.addEventListener("submit", (event) => {
   activity.textContent = "Working";
   activityTimer = window.setInterval(() => {
     const seconds = Math.floor((performance.now() - solveStarted) / 1000);
-    activity.textContent = `Working · ${seconds}s`;
+    activity.textContent = `Working ${seconds}s`;
     // The worker enforces the normal two-minute budget. This also recovers
     // the interface if a GPU operation never resolves.
     if (performance.now() - solveStarted >= LIMITE_WATCHDOG_MS) {
@@ -155,7 +155,7 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     modelReady = true;
     setStatus("ready");
     hint.textContent = "Ready";
-    activity.textContent = "Ready · runs on your device";
+    activity.textContent = "Ready";
     revealPrompt();
     console.info(`[Kalkulator] ready ${JSON.stringify(message.timings)}`);
     return;
@@ -167,8 +167,8 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     if (!modelReady) {
       const action = message.status.startsWith("downloading") ? "Downloading" : "Preparing";
       activity.textContent = message.progress === undefined
-        ? "Preparing your notebook"
-        : `${action} · ${Math.round(message.progress * 100)}%`;
+        ? "Preparing"
+        : `${action} ${Math.round(message.progress * 100)}%`;
       return;
     }
     setStatus(message.status);
@@ -202,9 +202,9 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     const finalStatus = hasBoxedAnswer ? "answer complete" : "no answer";
     setStatus(finalStatus);
     hint.textContent = completionHint(message.reason);
-    const seconds = ((performance.now() - solveStarted) / 1000).toFixed(1);
+    const seconds = Math.round((performance.now() - solveStarted) / 1000);
     activity.textContent = hasBoxedAnswer
-      ? `Finished · ${seconds}s · on your device`
+      ? `Finished in ${seconds}s`
       : completionHint(message.reason);
     const metrics = {
       tokens: message.tokens,
