@@ -2,10 +2,9 @@ import { LimiteWebGpuEngine } from "./limite-engine/engine";
 import {
   LIMITE_CONTEXT_TOKENS,
   LIMITE_DECODE_BATCH_SIZE,
-  LIMITE_MAX_SOLVE_MS,
+  LIMITE_MAX_OUTPUT_TOKENS,
   LIMITE_TOKENIZER_URL,
 } from "./limite-config";
-import { hasCompleteFinalBox } from "./boxed-answer";
 import type {
   CompletionReason,
   InferenceRequest,
@@ -97,11 +96,13 @@ async function solve(
       throw new Error("That problem is too long for the browser context.");
     }
 
-    const outputBudget = LIMITE_CONTEXT_TOKENS - tokens.length;
+    const outputBudget = Math.min(LIMITE_MAX_OUTPUT_TOKENS, LIMITE_CONTEXT_TOKENS - tokens.length);
 
     postStatus(`prefill · ${tokens.length} tok`, undefined, runId);
     const prefillStarted = performance.now();
-    const first = await activeEngine.prefill(tokens);
+    const first = await activeEngine.prefill(tokens, (processed) => {
+      postStatus(`prefill · ${processed} / ${tokens.length} tok`, undefined, runId);
+    });
     const firstTokenAt = performance.now();
     timings.prefillMs = firstTokenAt - prefillStarted;
     timings.firstTokenMs = firstTokenAt - runStarted;
@@ -113,7 +114,6 @@ async function solve(
       first,
       outputBudget,
       firstTokenAt,
-      runStarted + LIMITE_MAX_SOLVE_MS,
     );
     timings.totalMs = performance.now() - runStarted;
     const speed =
@@ -141,7 +141,6 @@ async function generate(
   first: number,
   outputBudget: number,
   firstTokenAt: number,
-  deadline: number,
 ): Promise<GenerationResult> {
   const sampled: number[] = [];
   const decoder = activeTokenizer.createDecoder();
@@ -168,16 +167,14 @@ async function generate(
       sampled.length === tokenLimit
     ) {
       const delta = decoded.slice(postedLength);
-      if (delta) {
-        postMessage({
-          type: "update",
-          runId,
-          delta,
-          tokens: sampled.length,
-          speed,
-        });
-        postedLength = decoded.length;
-      }
+      postMessage({
+        type: "update",
+        runId,
+        delta,
+        tokens: sampled.length,
+        speed,
+      });
+      postedLength = decoded.length;
       lastRender = now;
     }
   };
@@ -200,19 +197,11 @@ async function generate(
       sampled.push(next);
       appendToken(next);
 
-      if (hasCompleteFinalBox(decoded)) {
-        reason = "boxed";
-        break generation;
-      }
       if (sampled.length >= tokenLimit) break generation;
     }
 
     const remaining = tokenLimit - sampled.length;
     if (remaining <= 0) break;
-    if (performance.now() >= deadline) {
-      reason = "time";
-      break;
-    }
     pending = await activeEngine.decodeBatch(
       sampled[sampled.length - 1],
       Math.min(LIMITE_DECODE_BATCH_SIZE, remaining),

@@ -50,17 +50,23 @@ Please reason step by step, and put your final answer within \boxed{}.<|im_end|>
 
 Generation uses temperature 0.6 and full-vocabulary top-p 0.95 on the GPU, without a top-k cutoff. Only the 151,667 tokenizer IDs are eligible; the 13 padded model rows are excluded. `src/limite-engine/sampler.ts` contains the single production sampler. Token ID 151643 is BOS, EOS, and PAD; `<|im_end|>` is not treated as EOS.
 
-The runtime has a 16,384-token working context. The maximum output is the unused portion after the formatted prompt. Generation ends on EOS, when the context is full, after two minutes of solve time (checked between decode batches), or after a complete balanced `\boxed{...}` answer. A separate 150-second UI watchdog terminates an unresponsive worker and offers a reload. There are no automatic retries or answer-forcing passes. If the model emits `<think>`, the box is accepted only after `</think>`; enclosing math delimiters are retained before stopping.
+The runtime supports 131,072 context tokens and at most 126,976 output tokens, bounded by the space remaining after the prompt. These budgets follow Paradigma's technical report. Generation ends on the model's EOS, the token budget, or cancellation. A boxed expression is not a stop token: intermediate boxes must not truncate a solution. There is no wall-clock solve cutoff, automatic retry, or answer-forcing pass. A 150-second inactivity watchdog recovers a stalled worker; status and token progress reset it, and returning from a background tab grants a fresh interval.
 
-All working text stays in the six-line scrolling area. Only the completed boxed answer is printed beneath it. Completion flushes the visual writer, and the interface exposes preparation progress, elapsed solve time, and an explicit limit or error state.
+All working text stays in the six-line scrolling area. After EOS, the last complete boxed answer is printed beneath it. An unfinished thinking block or token-limited output is not presented as a final answer. Completion flushes the visual writer, and the interface exposes preparation progress, elapsed solve time, and an explicit limit or error state.
 
 ## Loading and performance
 
-The first visit downloads about 556 MiB of model data. Successful shards are cached in OPFS, stale artifact shards are removed, and later visits load the pinned artifact locally. Every downloaded or cached shard is checked against its manifest SHA-256; damaged cache entries are replaced. The browser still has to read the cached bytes, create GPU buffers, and compile pipelines on each page load. Private browsing, cleared site data, or insufficient storage quota can prevent persistence. The 16K FP32 attention cache uses about 456 MiB in addition to the weights and scratch buffers.
+The first visit downloads about 556 MiB of model data. Successful shards are cached in OPFS, stale artifact shards are removed, and later visits load the pinned artifact locally. Every downloaded or cached shard is checked against its manifest SHA-256; damaged cache entries are replaced. The browser still has to read the cached bytes, create GPU buffers, and compile pipelines on each page load. Private browsing, cleared site data, or insufficient storage quota can prevent persistence.
 
-A valid local WebGPU run of this candidate reached 53.63 generated tokens/second and returned the correct boxed answer to `17 + 25` in 5.80 seconds. This is a spot measurement, not a portable benchmark; performance depends on the GPU, browser, thermals, prompt length, and generated sequence length.
+Keys and values are stored as packed FP16 pairs; queries, reductions, softmax, and activations remain FP32. Global caches start at 4K tokens and grow geometrically while preserving the prefix. Local caches retain their fixed 1,025-slot rings. A new short solve releases an oversized global cache. Attention-cache storage is about 84 MiB initially, 228 MiB at 16K, and 1,572 MiB at 128K, excluding weights, scratch, and temporary allocations during growth. The maximum is a supported context budget, not a guarantee that every device has enough memory.
+
+Attention scores 32 keys in parallel per tile and merges four tiles per 128-key partition. RoPE factors are calculated only for the current decode batch, rather than allocating a full-context table. These are the only production kernels; no runtime benchmark or kernel selection is performed.
+
+See the dated measurements in RESULTS.md. Performance depends on the GPU, browser, thermals, prompt length, and generated sequence length. Longer generation budgets permit longer solutions; they do not establish answer accuracy or shorter waiting times.
 
 See [RESULTS.md](RESULTS.md) for dated checks and unresolved answer-quality limits. A working browser runtime is not evidence that all Paradigma blog problems are solved reliably.
+
+Reference: [Limite 1B Violetto technical report](https://paradigma.inc/research/limite-1b-violetto.pdf), Tables 5–6 and Section 5.
 
 ## Deployment invariants
 

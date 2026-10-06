@@ -6,9 +6,10 @@ export const LIMITE_TOKENIZER_URL =
 
 export const LIMITE_TOKENIZER_VOCAB_SIZE = 151_667;
 export const LIMITE_EOS_TOKEN = 151_643;
-export const LIMITE_CONTEXT_TOKENS = 16_384;
+export const LIMITE_CONTEXT_TOKENS = 131_072;
+export const LIMITE_MAX_OUTPUT_TOKENS = 126_976;
 export const LIMITE_TEMPERATURE = 0.6;
 export const LIMITE_TOP_P = 0.95;
 export const LIMITE_DECODE_BATCH_SIZE = 4;
-export const LIMITE_MAX_SOLVE_MS = 120_000;
-export const LIMITE_WATCHDOG_MS = LIMITE_MAX_SOLVE_MS + 30_000;
+// Recover stalled execution, not a healthy calculation that is still progressing.
+export const LIMITE_STALL_TIMEOUT_MS = 150_000;

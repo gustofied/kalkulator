@@ -113,7 +113,8 @@ export const QKV_POSTPROCESS_WORKGROUP_SIZE = LIMITE_HEAD_DIM;
  * Query/key RMS is gain-free with epsilon 1/128. Local layers apply the exact
  * Violetto interleaved rotation to the first 64 dimensions; global layers skip
  * RoPE. Value embedding is applied before the K/V cache write. K and V cache
- * buffers use [cache_slot][2][128] within the supplied layer offset. Local
+ * buffers pack adjacent FP16 pairs into u32 words, in [cache_slot][2][128]
+ * order. Computation and reductions remain FP32. Local
  * layers use the fixed 1025-slot ring `position % 1025`; global layers use the
  * supplied slot.
  *
@@ -121,15 +122,15 @@ export const QKV_POSTPROCESS_WORKGROUP_SIZE = LIMITE_HEAD_DIM;
  *   0: projected q/k/v/gates, f32
  *   1: current token value embedding [2][128], f32
  *   2: normalized/rotated query output [10][128], f32
- *   3: layer key cache, f32
- *   4: layer value cache, f32
+ *   3: layer key cache, packed FP16
+ *   4: layer value cache, packed FP16
  *   5: QkvPostprocessParams uniform (48 bytes)
  *   6: precomputed local RoPE cosine/signed-sine pairs, f32
  *
  * Params as u32 values:
  *   [position, slot, cache_capacity, is_global,
  *    has_value_embedding, projected_offset, value_embedding_offset,
- *    query_output_offset, key_cache_offset, value_cache_offset, 0, 0]
+ *    query_output_offset, key_cache_offset, value_cache_offset, rope_slot, 0]
  *
  * Dispatch exactly (12, 1, 1): ten query-head workgroups followed by two
  * key/value-head workgroups. Each workgroup has one lane per head dimension.
@@ -157,19 +158,21 @@ struct QkvPostprocessParams {
   query_output_offset: u32,
   key_cache_offset: u32,
   value_cache_offset: u32,
-  _padding_0: u32,
+  rope_slot: u32,
   _padding_1: u32,
 }
 
 @group(0) @binding(0) var<storage, read> projected: array<f32>;
 @group(0) @binding(1) var<storage, read> value_embedding: array<f32>;
 @group(0) @binding(2) var<storage, read_write> query_output: array<f32>;
-@group(0) @binding(3) var<storage, read_write> key_cache: array<f32>;
-@group(0) @binding(4) var<storage, read_write> value_cache: array<f32>;
+@group(0) @binding(3) var<storage, read_write> key_cache: array<u32>;
+@group(0) @binding(4) var<storage, read_write> value_cache: array<u32>;
 @group(0) @binding(5) var<uniform> params: QkvPostprocessParams;
 @group(0) @binding(6) var<storage, read> rope_factors: array<f32>;
 
 var<workgroup> squared_sum: array<f32, ${LIMITE_HEAD_DIM}>;
+var<workgroup> cached_keys: array<f32, ${LIMITE_HEAD_DIM}>;
+var<workgroup> cached_values: array<f32, ${LIMITE_HEAD_DIM}>;
 
 fn sigmoid(value: f32) -> f32 {
   return 1.0f / (1.0f + exp(-value));
@@ -179,7 +182,7 @@ fn rotate_local(value: f32, paired_value: f32, dimension: u32) -> f32 {
   if (params.is_global != 0u || dimension >= 64u) {
     return value;
   }
-  let factor = (params.position * 64u + dimension) * 2u;
+  let factor = (params.rope_slot * 64u + dimension) * 2u;
   return value * rope_factors[factor]
     + paired_value * rope_factors[factor + 1u];
 }
@@ -237,9 +240,7 @@ fn qkv_postprocess(
   let paired_key = projected[key_base + (lane ^ 1u)] * inverse_rms;
   let normalized_key = raw_key * inverse_rms;
 
-  let cache_index = cache_slot * KV_SIZE + kv_head * HEAD_DIM + lane;
-  key_cache[params.key_cache_offset + cache_index] =
-    rotate_local(normalized_key, paired_key, lane);
+  cached_keys[lane] = rotate_local(normalized_key, paired_key, lane);
 
   let raw_value = projected[
     params.projected_offset + V_OFFSET + kv_head * HEAD_DIM + lane
@@ -254,11 +255,20 @@ fn qkv_postprocess(
       params.value_embedding_offset + kv_head * HEAD_DIM + lane
     ];
   }
-  value_cache[params.value_cache_offset + cache_index] = value;
+  cached_values[lane] = value;
+  workgroupBarrier();
+  if (lane < HEAD_DIM / 2u) {
+    let pair = lane * 2u;
+    let cache_index = (cache_slot * KV_SIZE + kv_head * HEAD_DIM) / 2u + lane;
+    key_cache[params.key_cache_offset / 2u + cache_index] =
+      pack2x16float(vec2<f32>(cached_keys[pair], cached_keys[pair + 1u]));
+    value_cache[params.value_cache_offset / 2u + cache_index] =
+      pack2x16float(vec2<f32>(cached_values[pair], cached_values[pair + 1u]));
+  }
 }
 `;
 
-export const ATTENTION_PARTITION_KEYS = 32;
+export const ATTENTION_PARTITION_KEYS = 128;
 export const ATTENTION_PARTIAL_STRIDE = LIMITE_HEAD_DIM + 2;
 export const ATTENTION_WORKGROUP_SIZE = LIMITE_HEAD_DIM;
 
@@ -269,8 +279,8 @@ export const ATTENTION_WORKGROUP_SIZE = LIMITE_HEAD_DIM;
  * below WebGPU's minimum limit of eight storage buffers per shader stage:
  *
  *   0: normalized/rotated query [10][128], f32
- *   1: layer key cache [capacity][2][128], f32
- *   2: layer value cache [capacity][2][128], f32
+ *   1: layer key cache [capacity][2][128], packed FP16
+ *   2: layer value cache [capacity][2][128], packed FP16
  *   3: partition scratch, read_write f32
  *   4: projected q/k/v/gates, f32 (attention gate starts at element 1792)
  *   5: pre-tanh XSA alpha [10], f32
@@ -289,8 +299,8 @@ export const ATTENTION_WORKGROUP_SIZE = LIMITE_HEAD_DIM;
  *
  * Encode `attention_partition` first with dispatch
  * `(10, partition_count, 1)`, then `attention_finalize` with dispatch
- * `(10, 1, 1)`. `partition_count` is ceil(key_count / 32). For a full local
- * window key_count is 1025, so partition_count is 33. Global layers retain the
+ * `(10, 1, 1)`. `partition_count` is ceil(key_count / 128). For a full local
+ * window key_count is 1025, so partition_count is 9. Global layers retain the
  * full prefix and therefore need scratch sized for their maximum context.
  */
 export const GQA_ATTENTION_WGSL = /* wgsl */ `
@@ -329,8 +339,8 @@ struct AttentionParams {
 }
 
 @group(0) @binding(0) var<storage, read> query: array<f32>;
-@group(0) @binding(1) var<storage, read> key_cache: array<f32>;
-@group(0) @binding(2) var<storage, read> value_cache: array<f32>;
+@group(0) @binding(1) var<storage, read> key_cache: array<u32>;
+@group(0) @binding(2) var<storage, read> value_cache: array<u32>;
 @group(0) @binding(3) var<storage, read_write> partials: array<f32>;
 @group(0) @binding(4) var<storage, read> projected: array<f32>;
 @group(0) @binding(5) var<storage, read> xsa_alpha: array<f32>;
@@ -338,7 +348,10 @@ struct AttentionParams {
 @group(0) @binding(7) var<uniform> params: AttentionParams;
 
 var<workgroup> reduction: array<f32, ${LIMITE_HEAD_DIM}>;
-var<workgroup> shared_score: f32;
+var<workgroup> query_tile: array<f32, ${LIMITE_HEAD_DIM}>;
+var<workgroup> scores: array<f32, 32>;
+var<workgroup> probabilities: array<f32, 32>;
+var<workgroup> shared_old_scale: f32;
 var<workgroup> shared_maximum: f32;
 var<workgroup> shared_denominator: f32;
 
@@ -392,60 +405,67 @@ fn attention_partition(
     return;
   }
 
-  var local_maximum = NEGATIVE_INFINITY;
-  var local_denominator = 0.0f;
   var numerator = 0.0f;
-  let query_value = query[
-    params.query_offset + query_head * HEAD_DIM + lane
-  ];
+  query_tile[lane] = query[params.query_offset + query_head * HEAD_DIM + lane];
+  if (lane == 0u) {
+    shared_maximum = NEGATIVE_INFINITY;
+    shared_denominator = 0.0f;
+  }
+  workgroupBarrier();
 
-  var key_position = partition_start;
-  while (key_position < partition_end) {
-    let cache_slot = cache_slot_for_position(key_position);
-    // A full local ring is exactly 1025 slots. Global buffers must be sized to
-    // the maximum accepted context; this guard leaves an invalid slot masked.
-    if (cache_slot >= params.cache_capacity) {
-      key_position += 1u;
-      continue;
-    }
-    let cache_index = cache_slot * KV_SIZE + kv_head * HEAD_DIM + lane;
-    reduction[lane] = query_value * key_cache[
-      params.key_cache_offset + cache_index
-    ];
-    workgroupBarrier();
-
-    var stride = HEAD_DIM >> 1u;
-    while (stride > 0u) {
-      if (lane < stride) {
-        reduction[lane] += reduction[lane + stride];
+  // Four lanes cooperate on each of 32 keys. This replaces a whole-workgroup
+  // dot-product reduction for every key with one synchronization per tile.
+  for (var tile = partition_start; tile < partition_end; tile += 32u) {
+    let key_position = tile + lane / 4u;
+    let slot = cache_slot_for_position(key_position);
+    var score = 0.0f;
+    if (key_position < partition_end && slot < params.cache_capacity) {
+      let base = (params.key_cache_offset + slot * KV_SIZE + kv_head * HEAD_DIM) / 2u;
+      for (var pair = lane % 4u; pair < HEAD_DIM / 2u; pair += 4u) {
+        let key = unpack2x16float(key_cache[base + pair]);
+        score += dot(key, vec2<f32>(query_tile[pair * 2u], query_tile[pair * 2u + 1u]));
       }
-      workgroupBarrier();
-      stride >>= 1u;
     }
-    if (lane == 0u) {
-      shared_score = reduction[0] * ATTENTION_SCALE;
+    reduction[lane] = score;
+    workgroupBarrier();
+    if (lane < 32u) {
+      let offset = lane * 4u;
+      scores[lane] = select(NEGATIVE_INFINITY,
+        (reduction[offset] + reduction[offset + 1u]
+          + reduction[offset + 2u] + reduction[offset + 3u]) * ATTENTION_SCALE,
+        tile + lane < partition_end
+          && cache_slot_for_position(tile + lane) < params.cache_capacity);
     }
     workgroupBarrier();
-
-    let new_maximum = max(local_maximum, shared_score);
-    let old_scale = select(
-      exp(local_maximum - new_maximum),
-      0.0f,
-      local_denominator == 0.0f,
-    );
-    let new_scale = exp(shared_score - new_maximum);
-    let cached_value = value_cache[
-      params.value_cache_offset + cache_index
-    ];
-    numerator = numerator * old_scale + cached_value * new_scale;
-    local_denominator = local_denominator * old_scale + new_scale;
-    local_maximum = new_maximum;
-    key_position += 1u;
+    if (lane == 0u) {
+      var maximum = shared_maximum;
+      for (var key = 0u; key < 32u; key += 1u) {
+        maximum = max(maximum, scores[key]);
+      }
+      shared_old_scale = select(exp(shared_maximum - maximum), 0.0f, shared_denominator == 0.0f);
+      var denominator = shared_denominator * shared_old_scale;
+      for (var key = 0u; key < 32u; key += 1u) {
+        let weight = select(exp(scores[key] - maximum), 0.0f, scores[key] == NEGATIVE_INFINITY);
+        probabilities[key] = weight;
+        denominator += weight;
+      }
+      shared_maximum = maximum;
+      shared_denominator = denominator;
+    }
+    workgroupBarrier();
+    numerator *= shared_old_scale;
+    for (var key = 0u; key < min(32u, partition_end - tile); key += 1u) {
+      let value_slot = cache_slot_for_position(tile + key);
+      let index = params.value_cache_offset + value_slot * KV_SIZE + kv_head * HEAD_DIM + lane;
+      let pair = unpack2x16float(value_cache[index / 2u]);
+      numerator += select(pair.x, pair.y, (lane & 1u) != 0u) * probabilities[key];
+    }
+    workgroupBarrier();
   }
 
   if (lane == 0u) {
-    partials[record] = local_maximum;
-    partials[record + 1u] = local_denominator;
+    partials[record] = shared_maximum;
+    partials[record + 1u] = shared_denominator;
   }
   partials[record + 2u + lane] = numerator;
 }
@@ -502,9 +522,8 @@ fn attention_finalize(
 
   let kv_head = query_head / GROUP_SIZE;
   let current_value_index = current_slot * KV_SIZE + kv_head * HEAD_DIM + lane;
-  let current_value = value_cache[
-    params.value_cache_offset + current_value_index
-  ];
+  let current_pair = unpack2x16float(value_cache[(params.value_cache_offset + current_value_index) / 2u]);
+  let current_value = select(current_pair.x, current_pair.y, (lane & 1u) != 0u);
   reduction[lane] = current_value * current_value;
   workgroupBarrier();
   var stride = HEAD_DIM >> 1u;

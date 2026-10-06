@@ -4,7 +4,7 @@ import { Flip } from "gsap/Flip";
 import katex from "katex";
 
 import { findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
-import { LIMITE_WATCHDOG_MS } from "./limite-config";
+import { LIMITE_STALL_TIMEOUT_MS } from "./limite-config";
 import {
   type CompletionReason,
   type InferenceRequest,
@@ -53,6 +53,7 @@ let nextRunId = 1;
 let activeRunId: number | null = null;
 let activeRawText = "";
 let solveStarted = 0;
+let lastProgressAt = 0;
 let activityTimer: number | null = null;
 let reloadRequired = false;
 let finalRevealed = false;
@@ -113,13 +114,12 @@ form.addEventListener("submit", (event) => {
   const runId = nextRunId++;
   solving = true;
   solveStarted = performance.now();
+  lastProgressAt = solveStarted;
   activity.textContent = "Working";
   activityTimer = window.setInterval(() => {
-    const seconds = Math.floor((performance.now() - solveStarted) / 1000);
-    activity.textContent = `Working ${seconds}s`;
-    // The worker enforces the normal two-minute budget. This also recovers
-    // the interface if a GPU operation never resolves.
-    if (performance.now() - solveStarted >= LIMITE_WATCHDOG_MS) {
+    activity.textContent = `Working ${formatDuration(performance.now() - solveStarted)}`;
+    // Long reasoning is expected. Only an absence of progress is a stall.
+    if (!document.hidden && performance.now() - lastProgressAt >= LIMITE_STALL_TIMEOUT_MS) {
       worker.terminate();
       requireReload("The calculation stopped responding. Reload to try again.");
     }
@@ -149,6 +149,10 @@ window.addEventListener("pagehide", () => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) lastProgressAt = performance.now();
+});
+
 worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
   const message = event.data;
   if (message.type === "ready") {
@@ -163,6 +167,7 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
 
   if (message.type === "status") {
     if (message.runId !== undefined && message.runId !== activeRunId) return;
+    if (message.runId === activeRunId) lastProgressAt = performance.now();
     logPreparation(message.status, message.progress);
     if (!modelReady) {
       const action = message.status.startsWith("downloading") ? "Downloading" : "Preparing";
@@ -182,6 +187,7 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
 
   if (message.type === "update") {
     if (message.runId !== activeRunId) return;
+    lastProgressAt = performance.now();
     logGeneration(message.tokens, message.speed);
     activeRawText += message.delta;
     const phase = renderOutput(activeRawText, false);
@@ -192,8 +198,9 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
   if (message.type === "done") {
     if (message.runId !== activeRunId) return;
     activeRawText = message.text;
-    renderOutput(message.text, true);
-    const hasBoxedAnswer = message.reason === "boxed";
+    const hasBoxedAnswer = message.reason === "eos" && hasCompleteFinalBox(message.text);
+    renderOutput(message.text, hasBoxedAnswer);
+    flushWorkText(splitOutput(message.text, hasBoxedAnswer).reasoning);
     if (!hasBoxedAnswer) {
       revealAnswerLayout();
       showAnswerMessage(failureMessage(message.reason));
@@ -201,10 +208,9 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     answerSection.classList.remove("reasoning", "writing");
     const finalStatus = hasBoxedAnswer ? "answer complete" : "no answer";
     setStatus(finalStatus);
-    hint.textContent = completionHint(message.reason);
-    const seconds = Math.round((performance.now() - solveStarted) / 1000);
+    hint.textContent = hasBoxedAnswer ? "Ready for another problem." : completionHint(message.reason);
     activity.textContent = hasBoxedAnswer
-      ? `Finished in ${seconds}s`
+      ? `Finished in ${formatDuration(performance.now() - solveStarted)}`
       : completionHint(message.reason);
     const metrics = {
       tokens: message.tokens,
@@ -289,29 +295,26 @@ function failureMessage(reason: CompletionReason): string {
   switch (reason) {
     case "limit":
       return "No final answer within the available space. Try a simpler problem.";
-    case "time":
-      return "No final answer after two minutes. You can try again or simplify the problem.";
     case "eos":
       return "Violetto stopped before returning a boxed final answer.";
     case "cancelled":
       return "The calculation was cancelled.";
-    case "boxed":
-      return "";
   }
+}
+
+function formatDuration(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function completionHint(reason: CompletionReason): string {
   switch (reason) {
     case "limit":
       return "Space limit reached";
-    case "time":
-      return "Time limit reached";
     case "eos":
       return "Stopped before boxed answer";
     case "cancelled":
       return "Cancelled";
-    case "boxed":
-      return "Ready for another problem.";
   }
 }
 
@@ -524,7 +527,7 @@ function resetOutput(): void {
 }
 
 function renderOutput(rawText: string, complete: boolean): OutputPhase {
-  const output = splitOutput(rawText);
+  const output = splitOutput(rawText, complete);
 
   if (output.reasoning.trim()) {
     revealAnswerLayout();
@@ -639,7 +642,7 @@ function cleanWorkText(value: string): string {
   return value.trimStart().replace(/\s+/g, " ");
 }
 
-function splitOutput(rawText: string): {
+function splitOutput(rawText: string, complete: boolean): {
   reasoning: string;
   answer: string;
   thinking: boolean;
@@ -650,7 +653,7 @@ function splitOutput(rawText: string): {
   }
 
   const clean = (text: string) => text.replace(/<\/?think>/g, "").replace(/<\/?think[^>]*$/, "");
-  const box = findLastBoxedAnswer(rawText);
+  const box = complete ? findLastBoxedAnswer(rawText) : null;
   if (box && hasCompleteFinalBox(rawText)) {
     return {
       reasoning: clean(rawText.slice(0, box.commandStart))

@@ -1,4 +1,30 @@
-# Browser verification, 2026-10-05
+# Browser verification, 2026-10-06
+
+Report-aligned runtime: unchanged 555.87 MiB Q4 artifact, 131,072-token context, 126,976-token maximum output, packed FP16 attention cache with FP32 computation. One engine, no model selector, runtime probes, answer forcing, or automatic retries. EOS replaces stop-on-box; inactivity recovery replaces the two-minute solve cutoff.
+
+Verified in the real WebGPU browser at `http://127.0.0.1:5185/`:
+
+- Final end-to-end smoke: `17 + 25` returned boxed `42`, stopped on EOS, and re-enabled the form. 430 tokens, 56.29 decode tok/s, 523.7 ms prefill, 8.147 s total. This is a spot measurement, not evidence of a speedup over a different sampled response.
+- Packed attention agreed with an independent CPU calculation within `1e-7` absolute error on synthetic global positions 128, 4096, and 131071, and local-ring position 1031, including XSA and output gating. This verifies the checked attention arithmetic, not full-model parity.
+- Actual engine prefill of 4,094 tokens followed by a four-token decode crossed the 4K allocation boundary. Reset, cache shrink, and another decode succeeded with valid token IDs and no WebGPU validation errors.
+- `npm run build` and `git diff --check` passed. Temporary verification pages were removed; none are shipped.
+
+The larger budget removes a known truncation mismatch; it does not establish hard-question reliability or official-weight numerical parity. Full-model generation through 128K has not been measured. Initial attention-cache allocation is about 84 MiB; the full 128K cache is about 1,572 MiB, excluding weights and temporary growth allocations.
+
+## Bounded blog checks, 2026-10-06
+
+Two problems from [Paradigma's release post](https://paradigma.inc/blog/limite-1b-violetto/) were entered through the actual notebook UI, using plain-text mathematical notation without answer hints. One attempt per question, with a five-minute observation window declared in advance. The Q4 artifact, prompt template, sampling, and production generation limits were unchanged. There were no retries or selected seeds. Each unfinished run was stopped by reloading the page, not by a runtime time limit.
+
+| Question | Expected answer | Observed result | Observed elapsed | Last logged tokens | Last logged average decode tok/s |
+| --- | --- | --- | ---: | ---: | ---: |
+| Two equal minima | `240` | Still generating; no final answer | 301 s | 9,986 | 34.54 |
+| Jessica's brick wall | `3^2025` | Still generating; no final answer | 302 s | 6,918 | 23.73 |
+
+Token counts are lower bounds from the last periodic console sample, not exact counts at cancellation. The associated speeds are those samples' cumulative averages. They are not controlled speedup comparisons; the second run was slower even at shorter context. No WebGPU errors were observed. Reloads used the cached model and returned to the ready state.
+
+**0 of 2 attempts produced a completed answer within five minutes.** These are incomplete responses, not two graded wrong answers, and they do not establish whether the model would succeed with more time. The fast-answer goal remains unmet. No AIME benchmark, full reference reproduction, or additional optimization loop was run. No temporary scripts, pages, or model copies were created for these checks.
+
+# Previous candidate, 2026-10-05
 
 Production candidate: the existing 555.87 MiB Q4 artifact, full-vocabulary top-p 0.95 at temperature 0.6, 16,384-token context, 120-second solve budget. One inference worker and one generation stream. No seed selection, retries, answer hints, or second model.
 

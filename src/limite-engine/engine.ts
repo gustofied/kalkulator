@@ -48,6 +48,10 @@ import {
 
 const LAYER_COUNT = 48;
 const KV_WIDTH = LIMITE_KV_HEADS * LIMITE_HEAD_DIM;
+const INITIAL_CACHE_TOKENS = 4_096;
+const KV_BYTES_PER_TOKEN = KV_WIDTH * 2;
+const ROPE_VALUES_PER_TOKEN = 64 * 2;
+const ROPE_FREQUENCIES = Array.from({ length: 32 }, (_, pair) => Math.pow(1_024, -pair / 31));
 const QKV_OUTPUT_SIZE =
   LIMITE_QUERY_HEADS * LIMITE_HEAD_DIM + 2 * KV_WIDTH + LIMITE_QUERY_HEADS + LIMITE_KV_HEADS;
 const GLOBAL_LAYERS = new Set(Array.from({ length: 12 }, (_, index) => index * 4 + 3));
@@ -76,14 +80,16 @@ type Q4Operation = {
 type LayerRuntime = {
   readonly index: number;
   readonly isGlobal: boolean;
-  readonly cacheCapacity: number;
+  cacheCapacity: number;
+  keyCache: GPUBuffer;
+  valueCache: GPUBuffer;
   readonly qkv: Q4Operation;
   readonly output: Q4Operation;
   readonly gateUp: Q4Operation;
   readonly down: Q4Operation;
-  readonly qkvBindGroups: readonly GPUBindGroup[];
-  readonly attentionPartitionBindGroups: readonly GPUBindGroup[];
-  readonly attentionFinalizeBindGroups: readonly GPUBindGroup[];
+  qkvBindGroups: readonly GPUBindGroup[];
+  attentionPartitionBindGroups: readonly GPUBindGroup[];
+  attentionFinalizeBindGroups: readonly GPUBindGroup[];
   readonly attentionResidualBindGroup: GPUBindGroup;
   readonly mlpResidualBindGroup: GPUBindGroup;
 };
@@ -162,6 +168,7 @@ export class LimiteWebGpuEngine {
   );
   readonly #bindings: StaticBindings;
   readonly #layers: readonly LayerRuntime[];
+  readonly #ropeValues = new Float32Array(DECODE_BATCH_SIZE * ROPE_VALUES_PER_TOKEN);
   #position = 0;
 
   private constructor(
@@ -255,14 +262,19 @@ export class LimiteWebGpuEngine {
     seedRng(this.device, this.#scratch.rng);
   }
 
-  async prefill(tokens: readonly number[]): Promise<number> {
+  async prefill(tokens: readonly number[], onProgress: (processed: number) => void = () => {}): Promise<number> {
     if (tokens.length === 0) throw new Error("The formatted prompt is empty.");
     if (tokens.length >= LIMITE_CONTEXT_TOKENS) {
       throw new Error(`The prompt exceeds the ${LIMITE_CONTEXT_TOKENS}-token context.`);
     }
     this.reset();
+    await this.#ensureCache(tokens.length);
     for (let index = 0; index < tokens.length - 1; index++) {
-      this.#submitToken(tokens[index], false);
+      await this.#submitToken(tokens[index], false);
+      if ((index + 1) % 32 === 0) {
+        await this.device.queue.onSubmittedWorkDone();
+        onProgress(index + 1);
+      }
     }
     return this.#submitToken(tokens[tokens.length - 1], true);
   }
@@ -274,6 +286,7 @@ export class LimiteWebGpuEngine {
     }
     const batchCount = Math.min(Math.max(Math.floor(count), 1), DECODE_BATCH_SIZE, remaining);
     const startingPosition = this.#position;
+    await this.#ensureCache(startingPosition + batchCount);
     this.device.queue.writeBuffer(this.#scratch.token, 0, new Uint32Array([token]));
     for (let index = 0; index < batchCount; index++) {
       this.#prepareParameterSlot(startingPosition + index, index);
@@ -316,7 +329,69 @@ export class LimiteWebGpuEngine {
     this.device.destroy();
   }
 
+  async #ensureCache(required: number): Promise<void> {
+    const current = this.#layers[3].cacheCapacity;
+    const capacity = Math.min(
+      LIMITE_CONTEXT_TOKENS,
+      Math.max(INITIAL_CACHE_TOKENS, 2 ** Math.ceil(Math.log2(required))),
+    );
+    // Retain the current solve's prefix; release oversized caches on a new solve.
+    if (capacity === current || (this.#position > 0 && capacity < current)) return;
+    const replacements: { layer: LayerRuntime; key: GPUBuffer; value: GPUBuffer }[] = [];
+    this.device.pushErrorScope("out-of-memory");
+    this.device.pushErrorScope("validation");
+    let failure: unknown;
+    try {
+      const encoder = this.device.createCommandEncoder({ label: "Limite grow attention cache" });
+      for (const layer of this.#layers) {
+        if (!layer.isGlobal) continue;
+        const key = createCacheBuffer(this.device, layer.index, "key", capacity);
+        const value = createCacheBuffer(this.device, layer.index, "value", capacity);
+        replacements.push({ layer, key, value });
+        const bytes = this.#position * KV_BYTES_PER_TOKEN;
+        if (bytes > 0) {
+          encoder.copyBufferToBuffer(layer.keyCache, 0, key, 0, bytes);
+          encoder.copyBufferToBuffer(layer.valueCache, 0, value, 0, bytes);
+        }
+      }
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+    } catch (error) {
+      failure = error;
+    }
+    const validation = await this.device.popErrorScope();
+    const allocation = await this.device.popErrorScope();
+    if (failure || validation || allocation) {
+      for (const { key, value } of replacements) {
+        key.destroy();
+        value.destroy();
+      }
+      throw new Error("Could not grow GPU memory for this calculation. Try a shorter problem.", {
+        cause: failure ?? validation ?? allocation,
+      });
+    }
+    for (const { layer, key, value } of replacements) {
+      const bindings = createCacheBindings(
+        this.device, this.#pipelines, this.#scratch, this.#parameters,
+        this.#artifact.smallWeights, layer.index, key, value,
+      );
+      layer.keyCache.destroy();
+      layer.valueCache.destroy();
+      Object.assign(layer, bindings, { keyCache: key, valueCache: value, cacheCapacity: capacity });
+    }
+  }
+
   #prepareParameterSlot(position: number, parameterSlot: number): void {
+    for (let pair = 0; pair < 32; pair++) {
+      const theta = position * ROPE_FREQUENCIES[pair];
+      const offset = parameterSlot * ROPE_VALUES_PER_TOKEN + pair * 4;
+      const cosine = Math.cos(theta);
+      const sine = Math.sin(theta);
+      this.#ropeValues[offset] = cosine;
+      this.#ropeValues[offset + 1] = sine;
+      this.#ropeValues[offset + 2] = cosine;
+      this.#ropeValues[offset + 3] = -sine;
+    }
     for (const layer of this.#layers) {
       const cacheSlot = layer.isGlobal ? position : position % LIMITE_LOCAL_KEY_COUNT;
       const partitions = layer.isGlobal
@@ -335,7 +410,7 @@ export class LimiteWebGpuEngine {
           0,
           0,
           0,
-          0,
+          parameterSlot,
           0,
         ],
         qkvOffset,
@@ -366,6 +441,7 @@ export class LimiteWebGpuEngine {
   }
 
   #uploadParameterSlots(count: number): void {
+    this.device.queue.writeBuffer(this.#scratch.rope, 0, this.#ropeValues, 0, count * ROPE_VALUES_PER_TOKEN);
     this.device.queue.writeBuffer(
       this.#parameters,
       0,
@@ -551,7 +627,7 @@ function createScratch(device: GPUDevice): Scratch {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     }),
     rng: storage("Limite sampler RNG", 1, COPY_DST),
-    rope: createRopeTable(device),
+    rope: storage("Limite local RoPE factors", DECODE_BATCH_SIZE * ROPE_VALUES_PER_TOKEN, COPY_DST),
     embedding: storage("Limite embedding", LIMITE_HIDDEN_SIZE),
     hiddenA: storage("Limite hidden A", LIMITE_HIDDEN_SIZE),
     hiddenB: storage("Limite hidden B", LIMITE_HIDDEN_SIZE),
@@ -581,30 +657,86 @@ function createScratch(device: GPUDevice): Scratch {
   };
 }
 
-function createRopeTable(device: GPUDevice): GPUBuffer {
-  const dimensions = 64;
-  const valuesPerDimension = 2;
-  const buffer = device.createBuffer({
-    label: "Limite local RoPE factors",
-    size: LIMITE_CONTEXT_TOKENS * dimensions * valuesPerDimension * 4,
-    usage: STORAGE,
-    mappedAtCreation: true,
+function createCacheBuffer(device: GPUDevice, layer: number, kind: string, capacity: number): GPUBuffer {
+  return device.createBuffer({
+    label: `Limite layer ${layer} ${kind} cache`,
+    size: capacity * KV_BYTES_PER_TOKEN,
+    usage: STORAGE | COPY_DST | GPUBufferUsage.COPY_SRC,
   });
-  const values = new Float32Array(buffer.getMappedRange());
-  const frequencies = Array.from({ length: dimensions / 2 }, (_, pair) =>
-    Math.pow(1_024, -pair / (dimensions / 2 - 1)),
+}
+
+function createCacheBindings(
+  device: GPUDevice,
+  pipelines: Pipelines,
+  scratch: Scratch,
+  parameters: GPUBuffer,
+  smallWeights: GPUBuffer,
+  index: number,
+  keyCache: GPUBuffer,
+  valueCache: GPUBuffer,
+): Pick<LayerRuntime, "qkvBindGroups" | "attentionPartitionBindGroups" | "attentionFinalizeBindGroups"> {
+  const qkvBindGroups = Array.from({ length: DECODE_BATCH_SIZE }, (_, parameterSlot) =>
+    device.createBindGroup({
+      label: `Limite layer ${index} QKV bindings ${parameterSlot}`,
+      layout: pipelines.qkv.getBindGroupLayout(0),
+      entries: [
+        storageEntry(0, scratch.projectedQkv),
+        storageEntry(1, scratch.valueEmbedding),
+        storageEntry(2, scratch.query),
+        storageEntry(3, keyCache),
+        storageEntry(4, valueCache),
+        uniformRangeEntry(
+          5,
+          parameters,
+          parameterBlockOffset(parameterSlot, index, false),
+          48,
+        ),
+        storageEntry(6, scratch.rope),
+      ],
+    }),
   );
-  for (let position = 0; position < LIMITE_CONTEXT_TOKENS; position++) {
-    const positionBase = position * dimensions * valuesPerDimension;
-    for (let dimension = 0; dimension < dimensions; dimension++) {
-      const theta = position * frequencies[dimension >> 1];
-      const offset = positionBase + dimension * valuesPerDimension;
-      values[offset] = Math.cos(theta);
-      values[offset + 1] = Math.sin(theta) * (dimension % 2 === 0 ? 1 : -1);
-    }
-  }
-  buffer.unmap();
-  return buffer;
+  const attentionPartitionBindGroups = Array.from(
+    { length: DECODE_BATCH_SIZE },
+    (_, parameterSlot) =>
+      device.createBindGroup({
+        label: `Limite layer ${index} attention partition bindings ${parameterSlot}`,
+        layout: pipelines.attentionPartition.getBindGroupLayout(0),
+        entries: [
+          storageEntry(0, scratch.query),
+          storageEntry(1, keyCache),
+          storageEntry(2, valueCache),
+          storageEntry(3, scratch.attentionPartials),
+          uniformRangeEntry(
+            7,
+            parameters,
+            parameterBlockOffset(parameterSlot, index, true),
+            64,
+          ),
+        ],
+      }),
+  );
+  const attentionFinalizeBindGroups = Array.from(
+    { length: DECODE_BATCH_SIZE },
+    (_, parameterSlot) =>
+      device.createBindGroup({
+        label: `Limite layer ${index} attention finalize bindings ${parameterSlot}`,
+        layout: pipelines.attentionFinalize.getBindGroupLayout(0),
+        entries: [
+          storageEntry(2, valueCache),
+          storageEntry(3, scratch.attentionPartials),
+          storageEntry(4, scratch.projectedQkv),
+          storageEntry(5, smallWeights),
+          storageEntry(6, scratch.attentionOutput),
+          uniformRangeEntry(
+            7,
+            parameters,
+            parameterBlockOffset(parameterSlot, index, true),
+            64,
+          ),
+        ],
+      }),
+  );
+  return { qkvBindGroups, attentionPartitionBindGroups, attentionFinalizeBindGroups };
 }
 
 function createParameterBuffer(device: GPUDevice): GPUBuffer {
@@ -661,17 +793,9 @@ function createBindings(
 
   for (let index = 0; index < LAYER_COUNT; index++) {
     const isGlobal = GLOBAL_LAYERS.has(index);
-    const cacheCapacity = isGlobal ? LIMITE_CONTEXT_TOKENS : LIMITE_LOCAL_KEY_COUNT;
-    const keyCache = device.createBuffer({
-      label: `Limite layer ${index} key cache`,
-      size: cacheCapacity * KV_WIDTH * 4,
-      usage: STORAGE,
-    });
-    const valueCache = device.createBuffer({
-      label: `Limite layer ${index} value cache`,
-      size: cacheCapacity * KV_WIDTH * 4,
-      usage: STORAGE,
-    });
+    const cacheCapacity = isGlobal ? INITIAL_CACHE_TOKENS : LIMITE_LOCAL_KEY_COUNT;
+    const keyCache = createCacheBuffer(device, index, "key", cacheCapacity);
+    const valueCache = createCacheBuffer(device, index, "value", cacheCapacity);
     const current = index % 2 === 0 ? scratch.hiddenA : scratch.hiddenB;
     const next = index % 2 === 0 ? scratch.hiddenB : scratch.hiddenA;
     const residualBase = index === 24 || index === 47 ? scratch.muddResidual : current;
@@ -707,66 +831,8 @@ function createBindings(
       scratch.activated,
       scratch.projectedDown,
     );
-    const qkvBindGroups = Array.from({ length: DECODE_BATCH_SIZE }, (_, parameterSlot) =>
-      device.createBindGroup({
-        label: `Limite layer ${index} QKV bindings ${parameterSlot}`,
-        layout: pipelines.qkv.getBindGroupLayout(0),
-        entries: [
-          storageEntry(0, scratch.projectedQkv),
-          storageEntry(1, scratch.valueEmbedding),
-          storageEntry(2, scratch.query),
-          storageEntry(3, keyCache),
-          storageEntry(4, valueCache),
-          uniformRangeEntry(
-            5,
-            parameters,
-            parameterBlockOffset(parameterSlot, index, false),
-            48,
-          ),
-          storageEntry(6, scratch.rope),
-        ],
-      }),
-    );
-    const attentionPartitionBindGroups = Array.from(
-      { length: DECODE_BATCH_SIZE },
-      (_, parameterSlot) =>
-        device.createBindGroup({
-          label: `Limite layer ${index} attention partition bindings ${parameterSlot}`,
-          layout: pipelines.attentionPartition.getBindGroupLayout(0),
-          entries: [
-            storageEntry(0, scratch.query),
-            storageEntry(1, keyCache),
-            storageEntry(2, valueCache),
-            storageEntry(3, scratch.attentionPartials),
-            uniformRangeEntry(
-              7,
-              parameters,
-              parameterBlockOffset(parameterSlot, index, true),
-              64,
-            ),
-          ],
-        }),
-    );
-    const attentionFinalizeBindGroups = Array.from(
-      { length: DECODE_BATCH_SIZE },
-      (_, parameterSlot) =>
-        device.createBindGroup({
-          label: `Limite layer ${index} attention finalize bindings ${parameterSlot}`,
-          layout: pipelines.attentionFinalize.getBindGroupLayout(0),
-          entries: [
-            storageEntry(2, valueCache),
-            storageEntry(3, scratch.attentionPartials),
-            storageEntry(4, scratch.projectedQkv),
-            storageEntry(5, artifact.smallWeights),
-            storageEntry(6, scratch.attentionOutput),
-            uniformRangeEntry(
-              7,
-              parameters,
-              parameterBlockOffset(parameterSlot, index, true),
-              64,
-            ),
-          ],
-        }),
+    const cacheBindings = createCacheBindings(
+      device, pipelines, scratch, parameters, artifact.smallWeights, index, keyCache, valueCache,
     );
     const lambdaOffset = lambdaBase + index * 4;
     const attentionResidualBindGroup = mixBindGroup(
@@ -799,9 +865,9 @@ function createBindings(
       output,
       gateUp,
       down,
-      qkvBindGroups,
-      attentionPartitionBindGroups,
-      attentionFinalizeBindGroups,
+      keyCache,
+      valueCache,
+      ...cacheBindings,
       attentionResidualBindGroup,
       mlpResidualBindGroup,
     });
