@@ -4,6 +4,7 @@ import { Flip } from "gsap/Flip";
 import katex from "katex";
 
 import { findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
+import { createFollowScroller } from "./follow-scroll";
 import { LIMITE_STALL_TIMEOUT_MS } from "./limite-config";
 import {
   type CompletionReason,
@@ -516,7 +517,7 @@ function resetOutput(): void {
   answerSection.classList.remove("has-answer", "reasoning", "writing");
   workCopy.replaceChildren();
   finalCopy.replaceChildren();
-  resetFollowScroller(answerScroller);
+  answerScroller.reset();
   gsap.set([workCopy, finalCopy], { clearProps: "opacity,transform" });
   if (artState) {
     Flip.from(artState, {
@@ -572,7 +573,7 @@ function queueWorkText(value: string, complete: boolean): void {
     workWritten = "";
     workTextNode = null;
     workCopy.replaceChildren();
-    resetFollowScroller(answerScroller);
+    answerScroller.reset();
   }
   workTarget = text;
   workComplete = complete;
@@ -584,8 +585,12 @@ function writeNextWorkWord(): void {
   if (workWritten === workTarget) return;
 
   const remaining = workTarget.slice(workWritten.length);
+  // Keep the printed cadence without falling minutes behind a long response.
+  const words = Math.min(8, Math.max(1, Math.ceil(remaining.length / 160)));
   const next = remaining.match(
-    workComplete ? /^(\s*\S+(?:\s+|$)|\s+$)/ : /^(\s*\S+\s+)/,
+    new RegExp(workComplete
+      ? `^(?:\\s*\\S+(?:\\s+|$)|\\s+$){1,${words}}`
+      : `^(?:\\s*\\S+\\s+){1,${words}}`),
   )?.[0];
   if (!next) return;
 
@@ -599,10 +604,10 @@ function writeNextWorkWord(): void {
       { opacity: 1, y: 0, duration: 0.28, ease: "power3.out" },
     );
   }
-  followLatest(answerScroller);
+  answerScroller.followLatest();
 
   if (workWritten !== workTarget) {
-    const pause = /[.!?;:]\s*$/.test(next) ? 72 : 34;
+    const pause = words === 1 && /[.!?;:]\s*$/.test(next) ? 72 : 34;
     workTimer = window.setTimeout(writeNextWorkWord, reduceMotion ? 0 : pause);
   }
 }
@@ -619,18 +624,16 @@ function flushWorkText(value: string): void {
   }
   workWritten = workTarget;
   workComplete = true;
-  followLatest(answerScroller);
+  answerScroller.followLatest();
 }
 
 function appendWorkText(value: string): void {
   if (!value) return;
-  const firstWord = !workTextNode?.isConnected;
   if (!workTextNode?.isConnected) {
     workTextNode = document.createTextNode("");
     workCopy.append(workTextNode);
   }
   workTextNode.appendData(value);
-  if (firstWord) copyFlow.focus({ preventScroll: true });
 }
 
 function stopWorkWriter(): void {
@@ -857,160 +860,6 @@ function isEscaped(text: string, index: number): boolean {
     slashes += 1;
   }
   return slashes % 2 === 1;
-}
-
-type FollowScroller = {
-  element: HTMLElement;
-  following: boolean;
-  automatic: boolean;
-  frame: number | null;
-  tween: gsap.core.Tween | null;
-  lastHeight: number;
-};
-
-function createFollowScroller(element: HTMLElement): FollowScroller {
-  const scroller: FollowScroller = {
-    element,
-    following: true,
-    automatic: false,
-    frame: null,
-    tween: null,
-    lastHeight: element.scrollHeight,
-  };
-
-  const release = () => {
-    if (scroller.frame !== null) cancelAnimationFrame(scroller.frame);
-    scroller.tween?.kill();
-    scroller.frame = null;
-    scroller.tween = null;
-    scroller.automatic = false;
-    scroller.following = false;
-  };
-
-  const releaseAndCheckEnd = () => {
-    release();
-    scroller.frame = requestAnimationFrame(() => {
-      scroller.frame = null;
-      scroller.following = distanceFromEnd(element) <= 2;
-    });
-  };
-
-  const resume = () => {
-    release();
-    scroller.following = true;
-    scroller.lastHeight = -1;
-    followLatest(scroller);
-  };
-
-  element.addEventListener(
-    "wheel",
-    (event) => {
-      if (event.deltaY >= 0) releaseAndCheckEnd();
-      else release();
-    },
-    { passive: true },
-  );
-  element.addEventListener("touchstart", release, { passive: true });
-  element.addEventListener("pointerdown", release, { passive: true });
-  element.addEventListener(
-    "pointerleave",
-    (event) => {
-      if (event.pointerType === "mouse") resume();
-    },
-    { passive: true },
-  );
-  element.addEventListener(
-    "pointerup",
-    () => {
-      scroller.following = distanceFromEnd(element) <= 2;
-    },
-    { passive: true },
-  );
-  element.addEventListener("keydown", (event) => {
-    if (event.key === "End") {
-      event.preventDefault();
-      release();
-      scroller.automatic = true;
-      scroller.element.scrollTop = scroller.element.scrollHeight;
-      scroller.frame = requestAnimationFrame(() => {
-        scroller.frame = null;
-        scroller.automatic = false;
-        scroller.following = true;
-      });
-      return;
-    }
-    if (event.key === "Home") {
-      event.preventDefault();
-      release();
-      scroller.element.scrollTop = 0;
-      return;
-    }
-    if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
-      releaseAndCheckEnd();
-      return;
-    }
-    if (["ArrowUp", "PageUp"].includes(event.key) || (event.key === " " && event.shiftKey)) {
-      release();
-    }
-  });
-  element.addEventListener(
-    "scroll",
-    () => {
-      if (!scroller.automatic) {
-        scroller.following = distanceFromEnd(element) <= 2;
-      }
-    },
-    { passive: true },
-  );
-  return scroller;
-}
-
-function resetFollowScroller(scroller: FollowScroller): void {
-  if (scroller.frame !== null) cancelAnimationFrame(scroller.frame);
-  scroller.tween?.kill();
-  scroller.frame = null;
-  scroller.tween = null;
-  scroller.following = true;
-  scroller.automatic = false;
-  scroller.element.scrollTop = 0;
-  scroller.lastHeight = scroller.element.scrollHeight;
-}
-
-function followLatest(scroller: FollowScroller): void {
-  if (!scroller.following || scroller.frame !== null) return;
-  scroller.frame = requestAnimationFrame(() => {
-    scroller.frame = null;
-    if (!scroller.following) return;
-    const height = scroller.element.scrollHeight;
-    if (height === scroller.lastHeight) return;
-    scroller.lastHeight = height;
-    const target = Math.max(0, height - scroller.element.clientHeight);
-    if (target <= scroller.element.scrollTop + 1) return;
-
-    scroller.tween?.kill();
-    scroller.automatic = true;
-    if (reduceMotion) {
-      scroller.element.scrollTop = target;
-      scroller.automatic = false;
-      return;
-    }
-
-    scroller.tween = gsap.to(scroller.element, {
-      scrollTop: target,
-      duration: 0.28,
-      ease: "power3.out",
-      overwrite: true,
-      onComplete: () => {
-        scroller.tween = null;
-        scroller.automatic = false;
-        scroller.following = distanceFromEnd(scroller.element) <= 2;
-      },
-    });
-  });
-}
-
-function distanceFromEnd(element: HTMLElement): number {
-  return element.scrollHeight - element.scrollTop - element.clientHeight;
 }
 
 function setStatus(value: string): void {

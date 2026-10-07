@@ -27,6 +27,8 @@ export const Q4_32_MATVEC_ROWS_PER_GROUP = 4;
  * Four adjacent output rows share every activation load. Each lane owns one
  * packed u32 (eight adjacent weights), so all matrix and scale reads are
  * coalesced instead of redundantly loading the same word from eight lanes.
+ * Two vec4 dot products accumulate each word before applying its block scale.
+ * Weights, accumulation, and output retain the same Q4/FP32 contract.
  * Dispatch `ceil(row_count / 4)` workgroups. `column_count` must be a non-zero
  * multiple of 32, and `scale_offset_words` must be the aligned word offset of
  * the first packed scale.
@@ -52,6 +54,13 @@ var<workgroup> partial_3: array<f32, ${Q4_32_MATVEC_WORKGROUP_SIZE}>;
 fn block_scale(block_index: u32) -> f32 {
   let packed = unpack2x16float(matrix[params.scale_offset_words + (block_index >> 1u)]);
   return select(packed.x, packed.y, (block_index & 1u) != 0u);
+}
+
+fn dot_word(packed: u32, low: vec4<f32>, high: vec4<f32>) -> f32 {
+  let shifts = vec4<u32>(0u, 4u, 8u, 12u);
+  let codes_low = vec4<f32>((vec4<u32>(packed) >> shifts) & vec4<u32>(15u)) - vec4<f32>(8.0f);
+  let codes_high = vec4<f32>((vec4<u32>(packed >> 16u) >> shifts) & vec4<u32>(15u)) - vec4<f32>(8.0f);
+  return dot(low, codes_low) + dot(high, codes_high);
 }
 
 @compute @workgroup_size(${Q4_32_MATVEC_WORKGROUP_SIZE})
@@ -115,14 +124,12 @@ fn q4_32_matvec(
     }
 
     let input_base = block * ${Q4_32_BLOCK_ELEMENTS}u + word_in_block * 8u;
-    for (var element = 0u; element < 8u; element += 1u) {
-      let activation = input[input_base + element];
-      let shift = element * 4u;
-      sum_0 += activation * f32(i32((packed_0 >> shift) & 0x0fu) - 8) * scale_0;
-      sum_1 += activation * f32(i32((packed_1 >> shift) & 0x0fu) - 8) * scale_1;
-      sum_2 += activation * f32(i32((packed_2 >> shift) & 0x0fu) - 8) * scale_2;
-      sum_3 += activation * f32(i32((packed_3 >> shift) & 0x0fu) - 8) * scale_3;
-    }
+    let low = vec4<f32>(input[input_base], input[input_base + 1u], input[input_base + 2u], input[input_base + 3u]);
+    let high = vec4<f32>(input[input_base + 4u], input[input_base + 5u], input[input_base + 6u], input[input_base + 7u]);
+    sum_0 += dot_word(packed_0, low, high) * scale_0;
+    sum_1 += dot_word(packed_1, low, high) * scale_1;
+    sum_2 += dot_word(packed_2, low, high) * scale_2;
+    sum_3 += dot_word(packed_3, low, high) * scale_3;
   }
 
   partial_0[lane] = sum_0;

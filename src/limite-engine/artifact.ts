@@ -1,4 +1,5 @@
-import { LIMITE_MANIFEST_URL } from "../limite-config";
+import { LIMITE_MANIFEST_SHA256, LIMITE_MANIFEST_URL } from "../limite-config";
+import { loadModelMetadata } from "../model-metadata";
 
 const MANIFEST_VERSION = 1;
 const SHARD_COUNT = 6;
@@ -353,13 +354,8 @@ export async function loadLimiteQ4Artifact(
   onProgress: LimiteArtifactProgressCallback = () => {},
 ): Promise<LoadedLimiteQ4Artifact> {
   onProgress({ phase: "manifest" });
-  const manifestResponse = await fetch(LIMITE_MANIFEST_URL, { cache: "force-cache" });
-  if (!manifestResponse.ok) {
-    throw new Error(
-      `Could not fetch Limite Q4 manifest (${manifestResponse.status} ${manifestResponse.statusText}).`,
-    );
-  }
-  const manifest = validateLimiteQ4Manifest(await manifestResponse.json());
+  const manifestBytes = await loadModelMetadata(LIMITE_MANIFEST_URL, LIMITE_MANIFEST_SHA256, "model manifest");
+  const manifest = validateLimiteQ4Manifest(JSON.parse(new TextDecoder().decode(manifestBytes)));
   await removeStaleCachedShards(manifest.shards);
   const totalBytes = manifest.shards.reduce((total, shard) => total + shard.byteLength, 0);
   const smallValues = new Float32Array(SMALL_TENSOR_ELEMENTS);

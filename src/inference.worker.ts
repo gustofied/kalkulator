@@ -3,8 +3,10 @@ import {
   LIMITE_CONTEXT_TOKENS,
   LIMITE_DECODE_BATCH_SIZE,
   LIMITE_MAX_OUTPUT_TOKENS,
+  LIMITE_TOKENIZER_SHA256,
   LIMITE_TOKENIZER_URL,
 } from "./limite-config";
+import { loadModelMetadata } from "./model-metadata";
 import type {
   CompletionReason,
   InferenceRequest,
@@ -221,32 +223,25 @@ async function generate(
 async function setup(timings: RunTimings, runId?: number): Promise<void> {
   if (engine && tokenizer) return;
 
-  const tokenizerTask = tokenizer
-    ? Promise.resolve(tokenizer)
-    : loadTokenizer(timings, runId);
-  const engineTask = engine
-    ? Promise.resolve(engine)
-    : LimiteWebGpuEngine.create((progress) => {
-        if (progress.phase === "manifest") {
-          postStatus("preparing weights", undefined, runId);
-          return;
-        }
-        const ratio = progress.loadedBytes / progress.totalBytes;
-        const action =
-          progress.source === "cache" ? "reading cached weights" : "downloading weights";
-        postStatus(
-          `${action} · ${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`,
-          ratio,
-          runId,
-        );
-      });
-
-  const [loadedTokenizer, loadedEngine] = await Promise.all([tokenizerTask, engineTask]);
-  tokenizer = loadedTokenizer;
-  engine = loadedEngine;
-  timings.deviceMs = loadedEngine.timings.deviceMs;
-  timings.artifactMs = loadedEngine.timings.artifactMs;
-  timings.pipelineMs = loadedEngine.timings.pipelineMs;
+  // Validate the small language asset before allocating or downloading GPU weights.
+  tokenizer ??= await loadTokenizer(timings, runId);
+  engine ??= await LimiteWebGpuEngine.create((progress) => {
+    if (progress.phase === "manifest") {
+      postStatus("preparing weights", undefined, runId);
+      return;
+    }
+    const ratio = progress.loadedBytes / progress.totalBytes;
+    const action =
+      progress.source === "cache" ? "reading cached weights" : "downloading weights";
+    postStatus(
+      `${action} · ${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`,
+      ratio,
+      runId,
+    );
+  });
+  timings.deviceMs = engine.timings.deviceMs;
+  timings.artifactMs = engine.timings.artifactMs;
+  timings.pipelineMs = engine.timings.pipelineMs;
 }
 
 async function loadTokenizer(
@@ -255,9 +250,7 @@ async function loadTokenizer(
 ): Promise<ViolettoTokenizer> {
   postStatus("preparing language", undefined, runId);
   const started = performance.now();
-  const response = await fetch(LIMITE_TOKENIZER_URL, { cache: "force-cache" });
-  if (!response.ok) throw new Error(`Tokenizer download failed (${response.status}).`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const bytes = await loadModelMetadata(LIMITE_TOKENIZER_URL, LIMITE_TOKENIZER_SHA256, "tokenizer");
   timings.tokenizerReadMs = performance.now() - started;
   const parseStarted = performance.now();
   const loaded = ViolettoTokenizer.fromBinary(bytes);

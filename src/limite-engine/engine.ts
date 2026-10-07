@@ -217,9 +217,10 @@ export class LimiteWebGpuEngine {
     const deviceMs = performance.now() - deviceStarted;
 
     const artifactStarted = performance.now();
-    const artifact = await loadLimiteQ4Artifact(device, onProgress);
-    const artifactMs = performance.now() - artifactStarted;
+    let artifact: LoadedLimiteQ4Artifact | undefined;
     try {
+      artifact = await loadLimiteQ4Artifact(device, onProgress);
+      const artifactMs = performance.now() - artifactStarted;
       const pipelineStarted = performance.now();
       const pipelines = await createPipelines(device);
       const pipelineMs = performance.now() - pipelineStarted;
@@ -247,7 +248,7 @@ export class LimiteWebGpuEngine {
         { deviceMs, artifactMs, pipelineMs },
       );
     } catch (error) {
-      artifact.destroy();
+      artifact?.destroy();
       device.destroy();
       throw error;
     }
