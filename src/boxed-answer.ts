@@ -4,8 +4,6 @@ export type BoxedAnswer = {
   readonly closeBrace: number;
 };
 
-type MathDelimiter = "\\[" | "\\(" | "$$" | "$";
-
 /** Finds the last complete, non-empty `\\boxed { ... }` expression. */
 export function findLastBoxedAnswer(source: string): BoxedAnswer | null {
   const command = "\\boxed";
@@ -50,78 +48,28 @@ export function findLastBoxedAnswer(source: string): BoxedAnswer | null {
 }
 
 /**
- * Returns true only after the answer box and any math delimiter enclosing it
- * have both completed. This keeps the closing `$`, `$$`, `\\)`, or `\\]` in
- * the streamed answer instead of stopping on the box's closing brace.
+ * Validate only after EOS. The box is rendered independently, so surrounding
+ * prose (including currency symbols) must not affect its math delimiters.
  */
 export function hasCompleteFinalBox(source: string): boolean {
-  const thinkStart = source.indexOf("<think>");
-  const thinkEnd = thinkStart >= 0
-    ? source.indexOf("</think>", thinkStart + "<think>".length)
-    : -1;
-  if (thinkStart >= 0 && thinkEnd < 0) return false;
+  const thinkStart = source.lastIndexOf("<think>");
+  const thinkEnd = source.lastIndexOf("</think>");
+  if (thinkStart > thinkEnd) return false;
 
   const answerStart = thinkEnd >= 0 ? thinkEnd + "</think>".length : 0;
   const answer = source.slice(answerStart);
-  const box = findLastBoxedAnswer(answer);
-  if (!box) return false;
-
-  const delimiter = activeMathDelimiter(answer, box.commandStart);
-  return delimiter === null || hasClosingDelimiter(answer, box.closeBrace + 1, delimiter);
+  return findLastBoxedAnswer(answer) !== null;
 }
 
-function activeMathDelimiter(source: string, end: number): MathDelimiter | null {
-  let active: MathDelimiter | null = null;
-  for (let index = 0; index < end; index += 1) {
-    if (source.startsWith("\\[", index)) {
-      if (active === null) active = "\\[";
-      index += 1;
-      continue;
-    }
-    if (source.startsWith("\\]", index)) {
-      if (active === "\\[") active = null;
-      index += 1;
-      continue;
-    }
-    if (source.startsWith("\\(", index)) {
-      if (active === null) active = "\\(";
-      index += 1;
-      continue;
-    }
-    if (source.startsWith("\\)", index)) {
-      if (active === "\\(") active = null;
-      index += 1;
-      continue;
-    }
-    if (source[index] !== "$" || isEscaped(source, index)) continue;
-    const delimiter: MathDelimiter = source[index + 1] === "$" ? "$$" : "$";
-    if (delimiter === "$$") index += 1;
-    if (active === delimiter) active = null;
-    else if (active === null) active = delimiter;
+/** Keep a final boxed equation together instead of leaving its left half behind. */
+export function finalAnswerStart(source: string, box: BoxedAnswer): number {
+  const prefix = source.slice(0, box.commandStart);
+  let start = box.commandStart;
+  for (const [open, close] of [["\\[", "\\]"], ["\\(", "\\)"]] as const) {
+    const opening = prefix.lastIndexOf(open);
+    if (opening > prefix.lastIndexOf(close)) start = Math.min(start, opening);
   }
-  return active;
-}
-
-function hasClosingDelimiter(
-  source: string,
-  start: number,
-  delimiter: MathDelimiter,
-): boolean {
-  const closer = delimiter === "\\[" ? "\\]" : delimiter === "\\(" ? "\\)" : delimiter;
-  let cursor = start;
-  while (cursor < source.length) {
-    const found = source.indexOf(closer, cursor);
-    if (found < 0) return false;
-    if (!closer.startsWith("$") || !isEscaped(source, found)) return true;
-    cursor = found + closer.length;
-  }
-  return false;
-}
-
-function isEscaped(source: string, index: number): boolean {
-  let slashes = 0;
-  for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) {
-    slashes += 1;
-  }
-  return slashes % 2 === 1;
+  const displays = [...prefix.matchAll(/\$\$/g)];
+  if (displays.length % 2) start = Math.min(start, displays.at(-1)!.index);
+  return start;
 }

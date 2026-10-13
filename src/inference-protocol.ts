@@ -1,4 +1,4 @@
-export type CompletionReason = "eos" | "limit" | "cancelled";
+export type CompletionReason = "eos" | "limit" | "cancelled" | "timeout" | "repetition";
 
 export type RunTimings = {
   deviceMs?: number;
@@ -18,7 +18,17 @@ export type InferenceRequest =
       readonly runId: number;
       readonly problem: string;
     }
+  | { readonly type: "continue"; readonly runId: number }
   | { readonly type: "cancel"; readonly runId: number };
+
+type GenerationReport = {
+  readonly runId: number;
+  readonly text: string;
+  readonly tokens: number;
+  readonly speed: number;
+  readonly reason: CompletionReason;
+  readonly timings: RunTimings;
+};
 
 export type InferenceResponse =
   | {
@@ -35,14 +45,12 @@ export type InferenceResponse =
       readonly tokens: number;
       readonly speed: number;
     }
-  | {
-      readonly type: "done";
-      readonly runId: number;
-      readonly text: string;
-      readonly tokens: number;
-      readonly speed: number;
-      readonly reason: CompletionReason;
-      readonly timings: RunTimings;
-    }
+  | ({ readonly type: "done" } & GenerationReport)
+  | ({ readonly type: "paused" } & GenerationReport)
   | { readonly type: "rejected"; readonly runId: number; readonly message: string }
-  | { readonly type: "error"; readonly message: string; readonly runId?: number };
+  | {
+      readonly type: "error";
+      readonly message: string;
+      readonly runId?: number;
+      readonly reloadRequired?: boolean;
+    };

@@ -3,6 +3,7 @@ import {
   LIMITE_CONTEXT_TOKENS,
   LIMITE_DECODE_BATCH_SIZE,
   LIMITE_MAX_OUTPUT_TOKENS,
+  LIMITE_SOLVE_TIMEOUT_MS,
   LIMITE_TOKENIZER_SHA256,
   LIMITE_TOKENIZER_URL,
 } from "./limite-config";
@@ -13,8 +14,15 @@ import type {
   RunTimings,
 } from "./inference-protocol";
 import { ViolettoTokenizer } from "./tokenizer";
+import { hasRepeatingSuffix } from "./generation-policy";
 
 const RENDER_INTERVAL_MS = 250;
+
+class PrefillInterrupted extends Error {
+  constructor(readonly reason: "cancelled" | "timeout") {
+    super(reason);
+  }
+}
 
 type GenerationResult = {
   readonly text: string;
@@ -30,6 +38,12 @@ let busy = false;
 let activeRunId: number | null = null;
 let lastAcceptedRunId = 0;
 const cancelledRunIds = new Set<number>();
+type PausedGeneration = {
+  readonly runId: number;
+  readonly iterator: AsyncGenerator<GenerationResult, GenerationResult>;
+  readonly timings: RunTimings;
+};
+let pausedGeneration: PausedGeneration | null = null;
 
 self.addEventListener("message", (event: MessageEvent<InferenceRequest>) => {
   const request = event.data;
@@ -38,7 +52,13 @@ self.addEventListener("message", (event: MessageEvent<InferenceRequest>) => {
     return;
   }
 
-  if (request.type === "solve") {
+  if (request.type === "continue") {
+    if (busy || pausedGeneration?.runId !== request.runId) {
+      rejectRun(request.runId, "That calculation is no longer available to continue.");
+      return;
+    }
+    activeRunId = request.runId;
+  } else if (request.type === "solve") {
     if (!Number.isSafeInteger(request.runId) || request.runId <= 0) {
       rejectRun(request.runId, "Invalid inference run id.");
       return;
@@ -54,6 +74,7 @@ self.addEventListener("message", (event: MessageEvent<InferenceRequest>) => {
 
     lastAcceptedRunId = request.runId;
     activeRunId = request.runId;
+    pausedGeneration = null;
   } else if (busy) {
     return;
   }
@@ -62,9 +83,11 @@ self.addEventListener("message", (event: MessageEvent<InferenceRequest>) => {
   const operation =
     request.type === "prepare"
       ? prepare()
-      : solve(request.runId, request.problem);
+      : request.type === "continue"
+        ? resume(request.runId)
+        : solve(request.runId, request.problem);
   void operation.finally(() => {
-    if (request.type === "solve") {
+    if (request.type !== "prepare") {
       cancelledRunIds.delete(request.runId);
       if (activeRunId === request.runId) activeRunId = null;
     }
@@ -88,6 +111,7 @@ async function solve(
 ): Promise<void> {
   const timings: RunTimings = {};
   const runStarted = performance.now();
+  let prefillStarted = runStarted;
 
   try {
     await setup(timings, runId);
@@ -101,49 +125,74 @@ async function solve(
     const outputBudget = Math.min(LIMITE_MAX_OUTPUT_TOKENS, LIMITE_CONTEXT_TOKENS - tokens.length);
 
     postStatus(`prefill · ${tokens.length} tok`, undefined, runId);
-    const prefillStarted = performance.now();
+    prefillStarted = performance.now();
+    const deadline = prefillStarted + LIMITE_SOLVE_TIMEOUT_MS;
     const first = await activeEngine.prefill(tokens, (processed) => {
+      if (cancelledRunIds.has(runId)) throw new PrefillInterrupted("cancelled");
+      if (performance.now() >= deadline) throw new PrefillInterrupted("timeout");
       postStatus(`prefill · ${processed} / ${tokens.length} tok`, undefined, runId);
     });
     const firstTokenAt = performance.now();
     timings.prefillMs = firstTokenAt - prefillStarted;
     timings.firstTokenMs = firstTokenAt - runStarted;
 
-    const generation = await generate(
+    const iterator = generate(
       runId,
       activeEngine,
       activeTokenizer,
       first,
       outputBudget,
       firstTokenAt,
+      deadline,
     );
-    timings.totalMs = performance.now() - runStarted;
-    const speed =
-      generation.generationMs > 0
-        ? generation.measuredTokens / (generation.generationMs / 1000)
-        : 0;
-    postMessage({
-      type: "done",
-      runId,
-      text: generation.text,
-      tokens: generation.tokens,
-      speed,
-      reason: generation.reason,
-      timings,
-    });
+    await advanceGeneration({ runId, iterator, timings });
+  } catch (error) {
+    if (error instanceof PrefillInterrupted) {
+      timings.prefillMs = performance.now() - prefillStarted;
+      timings.totalMs = performance.now() - runStarted;
+      postMessage({ type: "done", runId, text: "", tokens: 0, speed: 0, reason: error.reason, timings });
+      return;
+    }
+    reportError(error, runId);
+  }
+}
+
+async function resume(runId: number): Promise<void> {
+  const saved = pausedGeneration!;
+  pausedGeneration = null;
+  try {
+    await advanceGeneration(saved);
   } catch (error) {
     reportError(error, runId);
   }
 }
 
-async function generate(
+async function advanceGeneration(saved: PausedGeneration): Promise<void> {
+  const { value: generation, done } = await saved.iterator.next();
+  if (!done) pausedGeneration = saved;
+  saved.timings.totalMs = (saved.timings.firstTokenMs ?? 0) + generation.generationMs;
+  postMessage({
+    type: done ? "done" : "paused",
+    runId: saved.runId,
+    text: generation.text,
+    tokens: generation.tokens,
+    speed: generation.generationMs > 0
+      ? generation.measuredTokens / (generation.generationMs / 1000)
+      : 0,
+    reason: generation.reason,
+    timings: saved.timings,
+  });
+}
+
+async function* generate(
   runId: number,
   activeEngine: LimiteWebGpuEngine,
   activeTokenizer: ViolettoTokenizer,
   first: number,
   outputBudget: number,
   firstTokenAt: number,
-): Promise<GenerationResult> {
+  deadline: number,
+): AsyncGenerator<GenerationResult, GenerationResult> {
   const sampled: number[] = [];
   const decoder = activeTokenizer.createDecoder();
   let decoded = "";
@@ -151,6 +200,7 @@ async function generate(
   let lastRender = 0;
   let reason: CompletionReason | null = null;
   let pending: readonly number[] = [first];
+  let pausedMs = 0;
   const tokenLimit = Math.min(
     Math.max(Math.floor(outputBudget), 1),
     Math.max(LIMITE_CONTEXT_TOKENS - activeEngine.position, 1),
@@ -160,7 +210,7 @@ async function generate(
     decoded = decoder.push(token);
     const now = performance.now();
     const measuredTokens = Math.max(0, sampled.length - 1);
-    const elapsed = Math.max((now - firstTokenAt) / 1000, 0.001);
+    const elapsed = Math.max((now - firstTokenAt - pausedMs) / 1000, 0.001);
     const speed = measuredTokens / elapsed;
 
     if (
@@ -186,6 +236,22 @@ async function generate(
       reason = "cancelled";
       break;
     }
+    if (performance.now() >= deadline) {
+      const pausedAt = performance.now();
+      // Keep the decoder, pending GPU batch, KV cache and RNG intact. The full
+      // snapshot replaces streamed text, so later deltas must start after it.
+      postedLength = decoded.length;
+      yield {
+        text: decoded,
+        tokens: sampled.length,
+        measuredTokens: Math.max(0, sampled.length - 1),
+        generationMs: pausedAt - firstTokenAt - pausedMs,
+        reason: "timeout",
+      };
+      const resumedAt = performance.now();
+      pausedMs += resumedAt - pausedAt;
+      deadline = resumedAt + LIMITE_SOLVE_TIMEOUT_MS;
+    }
     for (const next of pending) {
       if (cancelledRunIds.has(runId)) {
         reason = "cancelled";
@@ -199,6 +265,11 @@ async function generate(
       sampled.push(next);
       appendToken(next);
 
+      if (hasRepeatingSuffix(sampled)) {
+        reason = "repetition";
+        break generation;
+      }
+
       if (sampled.length >= tokenLimit) break generation;
     }
 
@@ -210,7 +281,7 @@ async function generate(
     );
   }
 
-  const generationMs = performance.now() - firstTokenAt;
+  const generationMs = performance.now() - firstTokenAt - pausedMs;
   return {
     text: decoder.finish(),
     tokens: sampled.length,
@@ -242,6 +313,13 @@ async function setup(timings: RunTimings, runId?: number): Promise<void> {
   timings.deviceMs = engine.timings.deviceMs;
   timings.artifactMs = engine.timings.artifactMs;
   timings.pipelineMs = engine.timings.pipelineMs;
+  void engine.device.lost.then(() => {
+    postMessage({
+      type: "error",
+      message: "The browser released the graphics device. Reload to continue.",
+      reloadRequired: true,
+    });
+  });
 }
 
 async function loadTokenizer(
@@ -265,6 +343,7 @@ function formatPrompt(problem: string): string {
 }
 
 function reportError(error: unknown, runId?: number): void {
+  pausedGeneration = null;
   console.error(error);
   postMessage({
     type: "error",

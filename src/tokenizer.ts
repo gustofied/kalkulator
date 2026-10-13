@@ -58,7 +58,8 @@ export class ViolettoTokenizer {
 
 export class ViolettoStreamDecoder {
   readonly #encoding: tokenizers.BpeEncoding;
-  readonly #utf8 = new TextDecoder();
+  // A generated BOM is token content, not a file header to discard.
+  readonly #utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
   #text = "";
 
   constructor(encoding: tokenizers.BpeEncoding) {

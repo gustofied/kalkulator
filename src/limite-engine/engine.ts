@@ -1,6 +1,7 @@
 import {
   LIMITE_CONTEXT_TOKENS,
   LIMITE_DECODE_BATCH_SIZE as DECODE_BATCH_SIZE,
+  LIMITE_EOS_TOKEN,
   LIMITE_TEMPERATURE,
   LIMITE_TOKENIZER_VOCAB_SIZE,
   LIMITE_TOP_P,
@@ -213,6 +214,9 @@ export class LimiteWebGpuEngine {
     });
     device.addEventListener("uncapturederror", (event) => {
       console.error("Uncaptured WebGPU error", event.error);
+      // A failed dispatch can leave old values in output buffers. Never let a
+      // damaged execution continue producing tokens; device loss triggers reload.
+      device.destroy();
     });
     const deviceMs = performance.now() - deviceStarted;
 
@@ -270,6 +274,7 @@ export class LimiteWebGpuEngine {
     }
     this.reset();
     await this.#ensureCache(tokens.length);
+    onProgress(0);
     for (let index = 0; index < tokens.length - 1; index++) {
       await this.#submitToken(tokens[index], false);
       if ((index + 1) % 32 === 0) {
@@ -317,7 +322,10 @@ export class LimiteWebGpuEngine {
       new Uint32Array(this.#scratch.tokenReadback.getMappedRange(), 0, batchCount),
     );
     this.#scratch.tokenReadback.unmap();
-    if (sampled.some((value) => value >= LIMITE_VOCAB_SIZE)) {
+    // Batched work after EOS is speculative and cannot invalidate a finished answer.
+    const eosIndex = sampled.indexOf(LIMITE_EOS_TOKEN);
+    if (eosIndex >= 0) sampled.length = eosIndex + 1;
+    if (sampled.some((value) => value >= LIMITE_TOKENIZER_VOCAB_SIZE)) {
       throw new Error("The GPU sampler returned an invalid token.");
     }
     return sampled;
@@ -477,7 +485,7 @@ export class LimiteWebGpuEngine {
     await this.#scratch.tokenReadback.mapAsync(GPUMapMode.READ);
     const sampled = new Uint32Array(this.#scratch.tokenReadback.getMappedRange())[0];
     this.#scratch.tokenReadback.unmap();
-    if (sampled >= LIMITE_VOCAB_SIZE) {
+    if (sampled >= LIMITE_TOKENIZER_VOCAB_SIZE) {
       throw new Error("The GPU sampler returned an invalid token.");
     }
     return sampled;

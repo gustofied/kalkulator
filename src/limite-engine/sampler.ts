@@ -1,4 +1,4 @@
-import { LIMITE_EOS_TOKEN, LIMITE_TOKENIZER_VOCAB_SIZE } from "../limite-config";
+import { LIMITE_TOKENIZER_VOCAB_SIZE } from "../limite-config";
 
 export const SAMPLER_WORKGROUP_SIZE = 256;
 export const SAMPLER_ENTRIES_PER_PARTITION = SAMPLER_WORKGROUP_SIZE;
@@ -41,7 +41,7 @@ export const GPU_TOP_P_SAMPLER_WGSL = /* wgsl */ `
 const WORKGROUP_SIZE = ${SAMPLER_WORKGROUP_SIZE}u;
 const PARTITION_SIZE = ${SAMPLER_ENTRIES_PER_PARTITION}u;
 const NEGATIVE_INFINITY = -3.402823e38f;
-const EOS_TOKEN = ${LIMITE_EOS_TOKEN}u;
+const INVALID_TOKEN = 0xffffffffu;
 
 struct SamplerParams {
   vocab_size: u32,
@@ -358,7 +358,8 @@ fn sample_nucleus(@builtin(local_invocation_index) lane: u32) {
     return;
   }
   if (!(total_mass > 0.0f) || cutoff_partition == 0xffffffffu) {
-    next_token[params.token_output_offset] = EOS_TOKEN;
+    // Numerical failure must not masquerade as successful model completion.
+    next_token[params.token_output_offset] = INVALID_TOKEN;
     return;
   }
 
@@ -381,7 +382,7 @@ fn sample_nucleus(@builtin(local_invocation_index) lane: u32) {
 
   let selected_count = partition_counts[selected_partition];
   if (selected_count == 0u) {
-    next_token[params.token_output_offset] = EOS_TOKEN;
+    next_token[params.token_output_offset] = INVALID_TOKEN;
     return;
   }
   let base = params.scratch_offset + selected_partition * PARTITION_SIZE;

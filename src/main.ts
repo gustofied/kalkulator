@@ -2,10 +2,12 @@ import "@fontsource/courier-prime/400.css";
 import { gsap } from "gsap";
 import { Flip } from "gsap/Flip";
 import katex from "katex";
+import renderMathInElement from "katex/contrib/auto-render";
 
-import { findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
+import { finalAnswerStart, findLastBoxedAnswer, hasCompleteFinalBox } from "./boxed-answer";
 import { createFollowScroller } from "./follow-scroll";
-import { LIMITE_STALL_TIMEOUT_MS } from "./limite-config";
+import { mathFromClipboard } from "./math-paste";
+import { LIMITE_SOLVE_TIMEOUT_MS, LIMITE_STALL_TIMEOUT_MS } from "./limite-config";
 import {
   type CompletionReason,
   type InferenceRequest,
@@ -17,7 +19,6 @@ gsap.registerPlugin(Flip);
 
 const form = document.querySelector<HTMLFormElement>("#prompt-form")!;
 const skipLink = document.querySelector<HTMLAnchorElement>(".skip-link")!;
-const promptLine = document.querySelector<HTMLElement>(".prompt-line")!;
 const prompt = document.querySelector<HTMLInputElement>("#prompt")!;
 const run = document.querySelector<HTMLButtonElement>("#run")!;
 const status = document.querySelector<HTMLElement>("#status")!;
@@ -45,14 +46,19 @@ const answerArtBlooms = bloomShapes.map((bloom) => {
   answerArt.insertBefore(layer, answerArtInk);
   return layer;
 });
-const worker = new Worker(new URL("./inference.worker.ts", import.meta.url), {
-  type: "module",
-});
+let worker: Worker | null = null;
 
 let solving = false;
 let nextRunId = 1;
 let activeRunId: number | null = null;
 let activeRawText = "";
+type PausedRun = {
+  readonly runId: number;
+  readonly problem: string;
+  readonly text: string;
+  readonly elapsedMs: number;
+};
+let pausedRun: PausedRun | null = null;
 let solveStarted = 0;
 let lastProgressAt = 0;
 let activityTimer: number | null = null;
@@ -63,10 +69,8 @@ let introTimeline: gsap.core.Timeline | null = null;
 let workingTimeline: gsap.core.Timeline | null = null;
 let workTarget = "";
 let workWritten = "";
-let workComplete = false;
 let workTimer: number | null = null;
 let workTextNode: Text | null = null;
-let finalRenderedSource = "";
 let preparationStage = "";
 let preparationProgressBucket = -1;
 let generationProgressBucket = -1;
@@ -78,10 +82,12 @@ startPreparationIntro();
 postWorkerMessage({ type: "prepare" });
 
 prompt.addEventListener("paste", (event) => {
-  const pasted = event.clipboardData?.getData("text");
-  if (!pasted || !/[\r\n]/.test(pasted)) return;
+  const plain = event.clipboardData?.getData("text/plain") ?? "";
+  const pasted = mathFromClipboard(event.clipboardData?.getData("text/html") ?? "") ?? plain;
+  if (!pasted || (pasted === plain && !/[\r\n]/.test(pasted))) return;
 
   event.preventDefault();
+  discardPausedRun();
   const start = prompt.selectionStart ?? prompt.value.length;
   const end = prompt.selectionEnd ?? start;
   const display = pasted.replace(/\s+/g, " ").trim();
@@ -93,10 +99,21 @@ prompt.addEventListener("paste", (event) => {
 });
 
 prompt.addEventListener("input", () => {
+  discardPausedRun();
   if (preservedPastedProblem?.display !== prompt.value.trim()) {
     preservedPastedProblem = null;
   }
 });
+
+function discardPausedRun(): void {
+  if (!pausedRun) return;
+  pausedRun = null;
+  resetOutput();
+  run.textContent = "solve";
+  activity.textContent = "Ready";
+  hint.textContent = "Violetto runs in your browser and can make mistakes.";
+  setStatus("ready");
+}
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -112,21 +129,38 @@ form.addEventListener("submit", (event) => {
     preservedPastedProblem?.display === displayedProblem
       ? preservedPastedProblem.raw
       : displayedProblem;
-  const runId = nextRunId++;
+  const saved = pausedRun?.problem === displayedProblem ? pausedRun : undefined;
+  if (!saved) resetOutput();
+  startModelSolve(problem, saved);
+});
+
+function startModelSolve(problem: string, saved?: PausedRun): void {
+  const runId = saved?.runId ?? nextRunId++;
   solving = true;
-  solveStarted = performance.now();
-  lastProgressAt = solveStarted;
+  const segmentStarted = performance.now();
+  solveStarted = segmentStarted - (saved?.elapsedMs ?? 0);
+  lastProgressAt = segmentStarted;
+  pausedRun = null;
+  run.textContent = "solve";
+  if (saved) {
+    finalCopy.replaceChildren();
+    finalRevealed = false;
+  }
   activity.textContent = "Working";
+  activity.title = `Up to ${formatDuration(LIMITE_SOLVE_TIMEOUT_MS)}. Press Escape to cancel.`;
+  hint.textContent = `Violetto can make mistakes. Up to ${formatDuration(LIMITE_SOLVE_TIMEOUT_MS)}. Press Escape to cancel.`;
   activityTimer = window.setInterval(() => {
     activity.textContent = `Working ${formatDuration(performance.now() - solveStarted)}`;
-    // Long reasoning is expected. Only an absence of progress is a stall.
-    if (!document.hidden && performance.now() - lastProgressAt >= LIMITE_STALL_TIMEOUT_MS) {
-      worker.terminate();
+    // The worker normally stops at its deadline. Recover if it cannot respond.
+    if (!document.hidden && (
+      performance.now() - lastProgressAt >= LIMITE_STALL_TIMEOUT_MS ||
+      performance.now() - segmentStarted >= LIMITE_SOLVE_TIMEOUT_MS + 15_000
+    )) {
       requireReload("The calculation stopped responding. Reload to try again.");
     }
   }, 1000);
   activeRunId = runId;
-  activeRawText = "";
+  activeRawText = saved?.text ?? "";
   answerSection.setAttribute("aria-busy", "true");
   form.classList.add("solving");
   prompt.disabled = true;
@@ -134,15 +168,12 @@ form.addEventListener("submit", (event) => {
   preparationStage = "";
   preparationProgressBucket = -1;
   generationProgressBucket = -1;
-  resetOutput();
   startWorkingMotion();
-  const request: InferenceRequest = {
-    type: "solve",
-    runId,
-    problem,
-  };
+  const request: InferenceRequest = saved
+    ? { type: "continue", runId }
+    : { type: "solve", runId, problem };
   postWorkerMessage(request);
-});
+}
 
 window.addEventListener("pagehide", () => {
   if (activeRunId !== null) {
@@ -150,16 +181,23 @@ window.addEventListener("pagehide", () => {
   }
 });
 
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.isComposing || activeRunId === null) return;
+  event.preventDefault();
+  postWorkerMessage({ type: "cancel", runId: activeRunId });
+});
+
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) lastProgressAt = performance.now();
 });
 
-worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
+function onInferenceMessage(event: MessageEvent<InferenceResponse>): void {
+  if (reloadRequired) return;
   const message = event.data;
   if (message.type === "ready") {
     modelReady = true;
     setStatus("ready");
-    hint.textContent = "Ready";
+    hint.textContent = "Violetto runs in your browser and can make mistakes.";
     activity.textContent = "Ready";
     revealPrompt();
     console.info(`[Kalkulator] ready ${JSON.stringify(message.timings)}`);
@@ -178,11 +216,6 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
       return;
     }
     setStatus(message.status);
-    if (message.progress !== undefined) {
-      hint.textContent = `${Math.round(message.progress * 100)}%`;
-    } else if (message.status.startsWith("prefill")) {
-      hint.textContent = "Model ready";
-    }
     return;
   }
 
@@ -196,31 +229,41 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     return;
   }
 
-  if (message.type === "done") {
+  if (message.type === "done" || message.type === "paused") {
     if (message.runId !== activeRunId) return;
+    const paused = message.type === "paused";
+    pausedRun = paused ? {
+      runId: message.runId,
+      problem: prompt.value.trim(),
+      text: message.text,
+      elapsedMs: message.timings.totalMs ?? performance.now() - solveStarted,
+    } : null;
     activeRawText = message.text;
-    const hasBoxedAnswer = message.reason === "eos" && hasCompleteFinalBox(message.text);
+    const hasBoxedAnswer = !paused && message.reason === "eos" && hasCompleteFinalBox(message.text);
     renderOutput(message.text, hasBoxedAnswer);
-    flushWorkText(splitOutput(message.text, hasBoxedAnswer).reasoning);
+    if (!hasBoxedAnswer) flushWorkText(splitOutput(message.text, false).reasoning);
     if (!hasBoxedAnswer) {
       revealAnswerLayout();
-      showAnswerMessage(failureMessage(message.reason));
+      showAnswerMessage(paused ? "No final answer yet. Continue from here." : failureMessage(message.reason));
     }
     answerSection.classList.remove("reasoning", "writing");
-    const finalStatus = hasBoxedAnswer ? "answer complete" : "no answer";
+    const finalStatus = paused ? "paused" : hasBoxedAnswer ? "answer complete" : "no answer";
     setStatus(finalStatus);
-    hint.textContent = hasBoxedAnswer ? "Ready for another problem." : completionHint(message.reason);
-    activity.textContent = hasBoxedAnswer
-      ? `Finished in ${formatDuration(performance.now() - solveStarted)}`
-      : completionHint(message.reason);
+    hint.textContent = paused
+      ? "Continue the same calculation, or edit the problem to start a new one."
+      : hasBoxedAnswer ? "Unverified model answer. Check it independently." : completionHint(message.reason);
+    activity.textContent = paused
+      ? `Paused at ${formatDuration(pausedRun!.elapsedMs)}`
+      : hasBoxedAnswer ? `Finished in ${formatDuration(performance.now() - solveStarted)}` : completionHint(message.reason);
     const metrics = {
       tokens: message.tokens,
       tokensPerSecond: Number(message.speed.toFixed(2)),
       ...message.timings,
     };
     const summary = { runId: message.runId, reason: message.reason, ...metrics };
-    console.info(`[Kalkulator] generation complete ${JSON.stringify(summary)}`);
+    console.info(`[Kalkulator] generation ${paused ? "paused" : "complete"} ${JSON.stringify(summary)}`);
     finishRun(message.runId);
+    run.textContent = paused ? "continue" : "solve";
     return;
   }
 
@@ -230,6 +273,7 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
     stopWorkingMotion();
     revealAnswerLayout();
     showAnswerMessage(message.message);
+    activity.textContent = "Could not finish";
     setStatus("error");
     hint.textContent = "Try again.";
     finishRun(message.runId);
@@ -238,36 +282,35 @@ worker.addEventListener("message", (event: MessageEvent<InferenceResponse>) => {
 
   if (message.runId !== undefined && message.runId !== activeRunId) return;
   console.error("[Kalkulator] preparation or inference failed", message.message);
-  activity.textContent = "Could not finish";
-  if (!modelReady) {
+  if (!modelReady || message.reloadRequired) {
     requireReload(message.message);
     return;
   }
   stopPreparationIntro();
   stopWorkingMotion();
+  activity.textContent = "Could not finish";
 
   revealAnswerLayout();
   showAnswerMessage(message.message);
   setStatus("error");
   hint.textContent = "Try again or reload the page.";
   finishRun(message.runId);
-});
-
-worker.addEventListener("error", (event) => {
-  console.error("[Kalkulator] inference worker failed", event.error ?? event.message);
-  requireReload("The notebook could not start. Reload to try again.");
-});
+}
 
 function requireReload(message: string): void {
+  pausedRun = null;
+  worker?.terminate();
+  worker = null;
   modelReady = false;
   reloadRequired = true;
   stopPreparationIntro();
   stopWorkingMotion();
   stopWorkWriter();
+  finishRun(activeRunId ?? undefined);
   revealAnswerLayout();
   showAnswerMessage(message);
   setStatus("error");
-  finishRun(activeRunId ?? undefined);
+  hint.textContent = "Reload to try again.";
   form.classList.remove("preparing");
   form.setAttribute("aria-hidden", "false");
   gsap.set(form, { autoAlpha: 1 });
@@ -280,8 +323,10 @@ function requireReload(message: string): void {
 function finishRun(runId?: number): void {
   if (runId !== undefined && activeRunId !== runId) return;
   stopWorkWriter();
+  stopWorkingMotion();
   if (activityTimer !== null) window.clearInterval(activityTimer);
   activityTimer = null;
+  activity.title = "";
   solving = false;
   activeRunId = null;
   activeRawText = "";
@@ -300,12 +345,17 @@ function failureMessage(reason: CompletionReason): string {
       return "Violetto stopped before returning a boxed final answer.";
     case "cancelled":
       return "The calculation was cancelled.";
+    case "timeout":
+      return `No final answer within ${formatDuration(LIMITE_SOLVE_TIMEOUT_MS)}. Try a simpler problem.`;
+    case "repetition":
+      return "The calculation began repeating and was stopped. Try rephrasing the problem.";
   }
 }
 
 function formatDuration(milliseconds: number): string {
   const seconds = Math.floor(milliseconds / 1000);
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
 }
 
 function completionHint(reason: CompletionReason): string {
@@ -316,11 +366,28 @@ function completionHint(reason: CompletionReason): string {
       return "Stopped before boxed answer";
     case "cancelled":
       return "Cancelled";
+    case "timeout":
+      return "Time limit reached";
+    case "repetition":
+      return "Repetition stopped";
   }
 }
 
 function postWorkerMessage(message: InferenceRequest): void {
-  worker.postMessage(message);
+  try {
+    if (!worker) {
+      if (message.type !== "prepare") return;
+      worker = new Worker(new URL("./inference.worker.ts", import.meta.url), { type: "module" });
+      worker.addEventListener("message", onInferenceMessage);
+      worker.addEventListener("error", (event) => {
+        console.error("[Kalkulator] inference worker failed", event.error ?? event.message);
+        requireReload("Violetto could not start. Reload to try again.");
+      });
+    }
+    worker.postMessage(message);
+  } catch {
+    requireReload("This browser could not start Violetto. Reload to try again.");
+  }
 }
 
 type OutputPhase = "waiting" | "reasoning" | "answer";
@@ -463,7 +530,6 @@ function revealPrompt(): void {
   form.setAttribute("aria-hidden", "false");
   prompt.disabled = false;
   run.disabled = false;
-
   gsap.set(form, { autoAlpha: 1 });
   gsap.set([prompt, run], {
     opacity: 0,
@@ -510,9 +576,7 @@ function resetOutput(): void {
   finalRevealed = false;
   workTarget = "";
   workWritten = "";
-  workComplete = false;
   workTextNode = null;
-  finalRenderedSource = "";
   answerSection.classList.add("waiting");
   answerSection.classList.remove("has-answer", "reasoning", "writing");
   workCopy.replaceChildren();
@@ -532,11 +596,7 @@ function renderOutput(rawText: string, complete: boolean): OutputPhase {
 
   if (output.reasoning.trim()) {
     revealAnswerLayout();
-    if (complete) {
-      flushWorkText(output.reasoning);
-    } else {
-      queueWorkText(output.reasoning, !output.thinking);
-    }
+    if (!complete) queueWorkText(output.reasoning);
   }
 
   if (!output.answer.trim()) {
@@ -544,13 +604,30 @@ function renderOutput(rawText: string, complete: boolean): OutputPhase {
   }
 
   flushWorkText(output.reasoning);
+  // Typeset only after completion: streaming fragments stay stable and readable.
+  // Single dollar signs remain currency, not guessed math delimiters.
+  renderMathInElement(workCopy, {
+    delimiters: [
+      { left: "\\[", right: "\\]", display: false },
+      { left: "\\(", right: "\\)", display: false },
+      { left: "$$", right: "$$", display: false },
+    ],
+    throwOnError: false,
+    strict: false,
+    trust: false,
+  });
+  answerScroller.followLatest();
   revealAnswerLayout();
-  const rendered = renderAnswerMath(output.answer, complete);
-  if (rendered && !finalRevealed) {
+  katex.render(output.answer, finalCopy, {
+    displayMode: false,
+    throwOnError: false,
+    strict: false,
+  });
+  if (!finalRevealed) {
     finalRevealed = true;
     animateFinalIn();
   }
-  return rendered ? "answer" : output.reasoning.trim() ? "reasoning" : "waiting";
+  return "answer";
 }
 
 function revealAnswerLayout(): void {
@@ -567,7 +644,7 @@ function revealAnswerLayout(): void {
   }
 }
 
-function queueWorkText(value: string, complete: boolean): void {
+function queueWorkText(value: string): void {
   const text = cleanWorkText(value);
   if (!text.startsWith(workWritten)) {
     workWritten = "";
@@ -576,7 +653,6 @@ function queueWorkText(value: string, complete: boolean): void {
     answerScroller.reset();
   }
   workTarget = text;
-  workComplete = complete;
   if (workTimer === null) writeNextWorkWord();
 }
 
@@ -588,9 +664,7 @@ function writeNextWorkWord(): void {
   // Keep the printed cadence without falling minutes behind a long response.
   const words = Math.min(8, Math.max(1, Math.ceil(remaining.length / 160)));
   const next = remaining.match(
-    new RegExp(workComplete
-      ? `^(?:\\s*\\S+(?:\\s+|$)|\\s+$){1,${words}}`
-      : `^(?:\\s*\\S+\\s+){1,${words}}`),
+    new RegExp(`^(?:\\s*\\S+\\s+){1,${words}}`),
   )?.[0];
   if (!next) return;
 
@@ -623,7 +697,6 @@ function flushWorkText(value: string): void {
     appendWorkText(workTarget);
   }
   workWritten = workTarget;
-  workComplete = true;
   answerScroller.followLatest();
 }
 
@@ -648,80 +721,29 @@ function cleanWorkText(value: string): string {
 function splitOutput(rawText: string, complete: boolean): {
   reasoning: string;
   answer: string;
-  thinking: boolean;
 } {
   const trimmed = rawText.trimStart();
   if ("<think>".startsWith(trimmed) && trimmed !== "<think>") {
-    return { reasoning: "", answer: "", thinking: true };
+    return { reasoning: "", answer: "" };
   }
 
-  const clean = (text: string) => text.replace(/<\/?think>/g, "").replace(/<\/?think[^>]*$/, "");
+  const clean = (text: string) => text.replace(/<\/?think>/g, " ").replace(/<\/?think[^>]*$/, "");
   const box = complete ? findLastBoxedAnswer(rawText) : null;
   if (box && hasCompleteFinalBox(rawText)) {
     return {
-      reasoning: clean(rawText.slice(0, box.commandStart))
+      reasoning: clean(rawText.slice(0, finalAnswerStart(rawText, box)))
         .replace(/(?:\\\[|\\\(|\$\$?)\s*$/, ""),
-      answer: `\\(${rawText.slice(box.commandStart, box.closeBrace + 1)}\\)`,
-      thinking: false,
+      answer: rawText.slice(box.commandStart, box.closeBrace + 1),
     };
   }
   return {
     reasoning: clean(rawText),
     answer: "",
-    thinking: true,
   };
-}
-
-function renderAnswerMath(rawText: string, complete: boolean): boolean {
-  const text = stableMarkdownPrefix(stableMathPrefix(rawText, complete), complete)
-    .replace(/\*\*/g, "")
-    .replace(/^#{1,6}\s?/gm, "")
-    .replace(/\n{3,}/g, "\n\n");
-
-  if (!text.startsWith(finalRenderedSource)) {
-    finalCopy.replaceChildren();
-    finalRenderedSource = "";
-  }
-
-  appendAnswerFragment(text.slice(finalRenderedSource.length));
-  finalRenderedSource = text;
-  return text.trim().length > 0;
-}
-
-function appendAnswerFragment(value: string): void {
-  if (!value) return;
-  let cursor = 0;
-  while (cursor < value.length) {
-    const span = findNextMathSpan(value, cursor);
-    if (!span) {
-      appendFinalText(value.slice(cursor));
-      return;
-    }
-    appendFinalText(value.slice(cursor, span.start));
-    const node = document.createElement("span");
-    katex.render(span.tex, node, {
-      displayMode: false,
-      throwOnError: false,
-      strict: false,
-    });
-    finalCopy.append(node);
-    cursor = span.end;
-  }
-}
-
-function appendFinalText(value: string): void {
-  if (!value) return;
-  const tail = finalCopy.lastChild;
-  if (tail?.nodeType === Node.TEXT_NODE) {
-    (tail as Text).appendData(value);
-  } else {
-    finalCopy.append(document.createTextNode(value));
-  }
 }
 
 function showAnswerMessage(message: string): void {
   finalCopy.replaceChildren(document.createTextNode(message));
-  finalRenderedSource = message;
   if (!finalRevealed) {
     finalRevealed = true;
     animateFinalIn();
@@ -735,131 +757,6 @@ function animateFinalIn(): void {
     { opacity: 0, y: 2 },
     { opacity: 1, y: 0, duration: 0.36, ease: "power3.out" },
   );
-}
-
-function stableMathPrefix(text: string, complete: boolean): string {
-  let cursor = 0;
-  while (cursor < text.length) {
-    const environment = mathEnvironmentAt(text, cursor);
-    if (environment) {
-      const close = findUnescaped(text, environment.close, environment.contentStart);
-      if (close < 0) {
-        return complete ? text : text.slice(0, cursor).replace(/\s+$/, "");
-      }
-      cursor = close + environment.close.length;
-      continue;
-    }
-
-    const delimiter = mathDelimiterAt(text, cursor);
-    if (!delimiter) {
-      cursor += 1;
-      continue;
-    }
-
-    const close = findUnescaped(text, delimiter.close, cursor + delimiter.open.length);
-    if (close < 0) {
-      return complete ? text : text.slice(0, cursor).replace(/\s+$/, "");
-    }
-    cursor = close + delimiter.close.length;
-  }
-  if (!complete && text.endsWith("\\") && !isEscaped(text, text.length - 1)) {
-    return text.slice(0, -1).replace(/\s+$/, "");
-  }
-  return complete ? text : text.replace(/\s+$/, "");
-}
-
-function stableMarkdownPrefix(text: string, complete: boolean): string {
-  if (complete) return text;
-  const stars = text.match(/\*+$/)?.[0];
-  return stars && stars.length % 2 === 1 ? text.slice(0, -1) : text;
-}
-
-type MathSpan = {
-  start: number;
-  end: number;
-  tex: string;
-};
-
-type MathDelimiter = {
-  open: string;
-  close: string;
-};
-
-type MathEnvironment = {
-  contentStart: number;
-  close: string;
-};
-
-function mathEnvironmentAt(text: string, index: number): MathEnvironment | null {
-  if (isEscaped(text, index) || !text.startsWith("\\begin{", index)) return null;
-  const match = /^\\begin\{([A-Za-z]+\*?)\}/.exec(text.slice(index));
-  if (!match) return null;
-  return {
-    contentStart: index + match[0].length,
-    close: `\\end{${match[1]}}`,
-  };
-}
-
-function mathDelimiterAt(text: string, index: number): MathDelimiter | null {
-  if (isEscaped(text, index)) return null;
-  if (text.startsWith("\\[", index)) {
-    return { open: "\\[", close: "\\]" };
-  }
-  if (text.startsWith("\\(", index)) {
-    return { open: "\\(", close: "\\)" };
-  }
-  if (text[index] === "$") {
-    return text.startsWith("$$", index)
-      ? { open: "$$", close: "$$" }
-      : { open: "$", close: "$" };
-  }
-  return null;
-}
-
-function findNextMathSpan(text: string, from: number): MathSpan | null {
-  for (let cursor = from; cursor < text.length; cursor++) {
-    const environment = mathEnvironmentAt(text, cursor);
-    if (environment) {
-      const close = findUnescaped(text, environment.close, environment.contentStart);
-      if (close < 0) return null;
-      const end = close + environment.close.length;
-      return {
-        start: cursor,
-        end,
-        tex: text.slice(cursor, end),
-      };
-    }
-
-    const delimiter = mathDelimiterAt(text, cursor);
-    if (!delimiter) continue;
-    const close = findUnescaped(text, delimiter.close, cursor + delimiter.open.length);
-    if (close < 0) return null;
-    return {
-      start: cursor,
-      end: close + delimiter.close.length,
-      tex: text.slice(cursor + delimiter.open.length, close),
-    };
-  }
-  return null;
-}
-
-function findUnescaped(text: string, value: string, from: number): number {
-  let cursor = from;
-  while (cursor < text.length) {
-    const index = text.indexOf(value, cursor);
-    if (index < 0) return -1;
-    if (!isEscaped(text, index)) return index;
-    cursor = index + value.length;
-  }
-  return -1;
-}
-
-function isEscaped(text: string, index: number): boolean {
-  let slashes = 0;
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor--) {
-    slashes += 1;
-  }
-  return slashes % 2 === 1;
 }
 
 function setStatus(value: string): void {

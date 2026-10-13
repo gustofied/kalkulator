@@ -37,8 +37,8 @@ export type LimiteQ4FormatManifest = {
     readonly blockSize: 32;
     readonly nibbleOrder: "low_first";
     readonly storedValue: "signed_plus_8";
-    readonly signedRange: readonly [-7, 7];
-    readonly scale: "max_abs_div_7";
+    readonly signedRange: readonly [-8, 7];
+    readonly scale: "fitted_signed_q4_f16";
     readonly scaleDtype: "f16";
     readonly matrixLayout: "output_major";
   };
@@ -426,7 +426,25 @@ async function fetchShard(
     return cached;
   }
 
-  const response = await fetch(url, { cache: "force-cache" });
+  // Bound an idle connection, not the total download time on a slow connection.
+  const controller = new AbortController();
+  const waitForProgress = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      return await operation();
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        throw new Error("The model download stopped responding. Check your connection and reload.", { cause });
+      }
+      throw cause;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const response = await waitForProgress(() => fetch(url, {
+    cache: "force-cache",
+    signal: controller.signal,
+  }));
   if (!response.ok) {
     throw new Error(
       `Could not fetch Limite Q4 shard ${shardIndex + 1}/${SHARD_COUNT} ` +
@@ -452,7 +470,7 @@ async function fetchShard(
   });
 
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await waitForProgress(() => reader.read());
     if (done) break;
     if (offset + value.byteLength > bytes.byteLength) {
       await reader.cancel();
@@ -698,8 +716,8 @@ function validateFormat(value: unknown): void {
     "signed_plus_8",
     "manifest.format.quantization.storedValue",
   );
-  exactArray(quantization.signedRange, [-7, 7], "manifest.format.quantization.signedRange");
-  literal(quantization.scale, "max_abs_div_7", "manifest.format.quantization.scale");
+  exactArray(quantization.signedRange, [-8, 7], "manifest.format.quantization.signedRange");
+  literal(quantization.scale, "fitted_signed_q4_f16", "manifest.format.quantization.scale");
   literal(quantization.scaleDtype, "f16", "manifest.format.quantization.scaleDtype");
   literal(quantization.matrixLayout, "output_major", "manifest.format.quantization.matrixLayout");
 }

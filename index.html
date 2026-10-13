@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Paradigma's Violetto mathematics model, running privately in your browser with WebGPU."
+      content="A private math notebook, powered by Paradigma's Violetto and WebGPU."
     />
     <meta name="theme-color" content="#ffffff" />
     <meta property="og:title" content="Kalkulator" />
     <meta
       property="og:description"
-      content="Paradigma's Violetto mathematics model, running privately in your browser with WebGPU."
+      content="A private math notebook, powered by Paradigma's Violetto and WebGPU."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://gustofied.github.io/kalkulator/" />
@@ -36,11 +36,11 @@
           />
           <button id="run" type="submit" disabled>solve</button>
         </div>
-        <small id="hint" class="visually-hidden">The model is kept on this machine after its first use.</small>
+        <small id="hint" class="visually-hidden">Violetto runs in your browser and can make mistakes.</small>
         <span id="status" class="visually-hidden" aria-live="polite" aria-atomic="true">idle</span>
       </form>
 
-      <article id="result" aria-label="Violetto answer">
+      <article id="result" aria-label="Calculation">
         <section id="answer-section" class="answer-section waiting">
           <div id="answer" class="answer">
             <figure id="answer-art" class="answer-art" aria-hidden="true">
@@ -48,7 +48,7 @@
               <img class="answer-art-ink" src="./gothic-k-scholar.png" alt="" />
             </figure>
             <div class="answer-copy">
-              <div id="copy-flow" class="copy-flow" role="region" aria-label="Reasoning" tabindex="0">
+              <div id="copy-flow" class="copy-flow" role="region" aria-label="Working" tabindex="0">
                 <div id="work-copy" class="work-copy"></div>
               </div>
               <div id="final-copy" class="final-copy" aria-live="polite"></div>

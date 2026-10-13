@@ -47,6 +47,38 @@ def product(shape: list[int]) -> int:
     return math.prod(shape) if shape else 1
 
 
+def fit_q4_blocks(blocks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fit signed Q4 codes against the FP16 scale actually stored on disk."""
+    if not np.isfinite(blocks).all():
+        raise ValueError("Cannot quantize non-finite weights")
+    maximum = np.max(np.abs(blocks), axis=-1, keepdims=True)
+    original_scale = maximum / np.float32(7)
+    codes = np.clip(np.rint(blocks / np.where(original_scale == 0, 1, original_scale)), -7, 7)
+    scales = original_scale.astype(np.float16).astype(np.float32)
+    loss = np.sum((blocks - codes * scales) ** 2, axis=-1, keepdims=True)
+    # Keep the original rounding unless a fitted block strictly lowers its error.
+    # A signed scale lets either tail use the extra negative Q4 code, without a
+    # zero point or any additional work in the browser's dequantization kernels.
+    for sign in (1, -1):
+        for ratio in (.8, .9, 1., 1.1):
+            scale = (original_scale * np.float32(sign * ratio)).astype(np.float16).astype(np.float32)
+            for _ in range(3):
+                trial = np.clip(np.rint(blocks / np.where(scale == 0, 1, scale)), -8, 7)
+                error = np.sum((blocks - trial * scale) ** 2, axis=-1, keepdims=True)
+                better = error < loss
+                codes = np.where(better, trial, codes)
+                scales = np.where(better, scale, scales)
+                loss = np.minimum(loss, error)
+                denominator = np.sum(trial * trial, axis=-1, keepdims=True)
+                scale = (
+                    np.sum(blocks * trial, axis=-1, keepdims=True)
+                    / np.where(denominator == 0, 1, denominator)
+                ).astype(np.float16).astype(np.float32)
+    if not np.isfinite(scales).all() or not np.isfinite(loss).all():
+        raise ValueError("Q4 scales exceed the supported FP16 range")
+    return codes.astype(np.int8), scales[..., 0].astype("<f2")
+
+
 class SafeTensorFile:
     """Minimal, read-only safetensors reader with zero-copy tensor views."""
 
@@ -247,12 +279,8 @@ class ShardWriter:
             if values.shape != expected_shape:
                 raise ValueError(f"{name} reader returned {values.shape}, expected {expected_shape}")
             blocks = values.reshape(stop - start, blocks_per_row, BLOCK_SIZE)
-            max_abs = np.max(np.abs(blocks), axis=2)
-            scale = max_abs / np.float32(7.0)
-            safe_scale = np.where(scale == 0, np.float32(1.0), scale)
-            quantized = np.rint(blocks / safe_scale[:, :, None])
-            np.clip(quantized, -7, 7, out=quantized)
-            signed = quantized.astype(np.int8).reshape(stop - start, columns)
+            quantized, scale = fit_q4_blocks(blocks)
+            signed = quantized.reshape(stop - start, columns)
             biased = (signed.astype(np.int16) + 8).astype(np.uint8)
             packed = biased[:, 0::2] | (biased[:, 1::2] << np.uint8(4))
             encoded = packed.tobytes(order="C")
@@ -532,8 +560,8 @@ def main() -> int:
                     "blockSize": BLOCK_SIZE,
                     "nibbleOrder": "low_first",
                     "storedValue": "signed_plus_8",
-                    "signedRange": [-7, 7],
-                    "scale": "max_abs_div_7",
+                    "signedRange": [-8, 7],
+                    "scale": "fitted_signed_q4_f16",
                     "scaleDtype": "f16",
                     "matrixLayout": "output_major",
                 },

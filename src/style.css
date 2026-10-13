@@ -277,10 +277,16 @@ input:focus-visible { outline: 0; }
 .work-copy:empty,
 .final-copy:empty { display: none; }
 
+.work-copy .katex { font-size: 1em; }
+
 .final-copy {
   color: var(--ink);
   overflow-anchor: none;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+
+.final-copy::-webkit-scrollbar { display: none; }
 
 .answer-copy:has(.work-copy:not(:empty)) .final-copy:not(:empty) { margin-top: 8px; }
 
