@@ -1,7 +1,10 @@
 <h1 align="center">Kalkulator</h1>
 
 <p align="center">
-  <img src="public/gothic-k-scholar.png" alt="Kalkulator engraved initial" width="96" height="96">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/kalkulator-emblem-dark.svg">
+    <img src="public/gothic-k-scholar.png" alt="Kalkulator engraved initial" width="96" height="96">
+  </picture>
 </p>
 
 <p align="center">
