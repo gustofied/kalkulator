@@ -1,8 +1,12 @@
-# Kalkulator
+<h1 align="center">Kalkulator</h1>
 
-<img src="public/gothic-k-scholar.png" alt="Kalkulator engraved initial" width="64" height="64">
+<p align="center">
+  <img src="public/gothic-k-scholar.png" alt="Kalkulator engraved initial" width="96" height="96">
+</p>
 
-[Open Kalkulator](https://gustofied.github.io/kalkulator/)
+<p align="center">
+  <a href="https://gustofied.github.io/kalkulator/">Open Kalkulator</a>
+</p>
 
 - [Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto) for maths, running entirely in your browser.
 - [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU, with no inference server.
@@ -10,11 +14,11 @@
 
 ## Example
 
-Add $\frac{7}{12}$ and $\frac{5}{18}$.
+Add $`\frac{7}{12}`$ and $`\frac{5}{18}`$.
 
-$$
+```math
 \frac{21}{36} + \frac{10}{36} = \boxed{\frac{31}{36}}
-$$
+```
 
 ## Run locally
 
