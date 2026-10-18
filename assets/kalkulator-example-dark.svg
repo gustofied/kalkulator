@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 176" role="img" aria-labelledby="title description">
+  <title id="title">Adding two fractions</title>
+  <desc id="description">Illustrative worked example: add 7/12 and 5/18. Use the common denominator 36: 7/12 equals 21/36 and 5/18 equals 10/36. Add the numerators, 21 plus 10 equals 31. The answer is 31/36.</desc>
+  <style>
+    svg { color: #FFFFFF; }
+    text { fill: currentColor; }
+    .label, .working { font-family: "Courier Prime", "Courier New", monospace; font-size: 12px; }
+    .label { opacity: .56; }
+    .working { opacity: .72; }
+    .math { font-family: "KaTeX_Main", "Times New Roman", serif; font-size: 24px; text-anchor: middle; }
+    .rule { fill: none; stroke: currentColor; stroke-width: 1; }
+    .frame { opacity: .16; }
+    .divider { opacity: .12; }
+    .fraction { opacity: .8; }
+    .answer { opacity: .6; }
+  </style>
+  <rect class="rule frame" x=".5" y=".5" width="639" height="175"/>
+  <path class="rule divider" d="M184 24v128 M520 24v128"/>
+  <text class="label" x="24" y="40">Problem</text>
+  <text class="label" x="208" y="40">Working</text>
+  <text class="label" x="552" y="40">Answer</text>
+  <g class="math">
+    <text x="52" y="92">7</text>
+    <text x="52" y="128">12</text>
+    <text x="92" y="110">+</text>
+    <text x="132" y="92">5</text>
+    <text x="132" y="128">18</text>
+  </g>
+  <path class="rule fraction" d="M36 102h32 M116 102h32"/>
+  <g class="working">
+    <text x="208" y="78">Common denominator: 36.</text>
+    <text x="208" y="102">7/12 = 21/36; 5/18 = 10/36</text>
+    <text x="208" y="126">21 + 10 = 31.</text>
+  </g>
+  <rect class="rule answer" x="552.5" y="64.5" width="63" height="79"/>
+  <g class="math">
+    <text x="584" y="92">31</text>
+    <text x="584" y="128">36</text>
+  </g>
+  <path class="rule fraction" d="M568 102h32"/>
+</svg>
