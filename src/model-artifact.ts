@@ -1,5 +1,5 @@
-import { LIMITE_MANIFEST_SHA256, LIMITE_MANIFEST_URL } from "../limite-config";
-import { loadModelMetadata } from "../model-metadata";
+import { LIMITE_MANIFEST_SHA256, LIMITE_MANIFEST_URL } from "./limite-config";
+import { loadModelMetadata } from "./model-metadata";
 
 const MANIFEST_VERSION = 1;
 const SHARD_COUNT = 6;
@@ -158,41 +158,6 @@ export type LimiteArtifactProgress =
 
 export type LimiteArtifactProgressCallback = (progress: LimiteArtifactProgress) => void;
 
-const XSA_OFFSET = 0;
-const XSA_LENGTH = LAYER_COUNT * QUERY_HEADS;
-const LAMBDAS_OFFSET = XSA_OFFSET + XSA_LENGTH;
-const LAMBDAS_LENGTH = LAYER_COUNT * 4;
-const MUDD_DENSE1_OFFSET = LAMBDAS_OFFSET + LAMBDAS_LENGTH;
-const MUDD_DENSE1_LENGTH = 32 * HIDDEN_SIZE;
-const MUDD_DENSE2_OFFSET = MUDD_DENSE1_OFFSET + MUDD_DENSE1_LENGTH;
-const MUDD_DENSE2_LENGTH = LAYER_COUNT * 3 * 32;
-const MUDD_DENSE2_MLP_OFFSET = MUDD_DENSE2_OFFSET + MUDD_DENSE2_LENGTH;
-const MUDD_DENSE2_MLP_LENGTH = LAYER_COUNT * 3 * 32;
-const MUDD_BIAS_OFFSET = MUDD_DENSE2_MLP_OFFSET + MUDD_DENSE2_MLP_LENGTH;
-const MUDD_BIAS_LENGTH = LAYER_COUNT * 3;
-const MUDD_BIAS_MLP_OFFSET = MUDD_BIAS_OFFSET + MUDD_BIAS_LENGTH;
-const MUDD_BIAS_MLP_LENGTH = LAYER_COUNT * 3;
-const SMALL_TENSOR_ELEMENTS = MUDD_BIAS_MLP_OFFSET + MUDD_BIAS_MLP_LENGTH;
-
-export const SMALL_TENSOR_LAYOUT = {
-  xsa: XSA_OFFSET,
-  lambdas: LAMBDAS_OFFSET,
-  dense1: MUDD_DENSE1_OFFSET,
-  dense2: MUDD_DENSE2_OFFSET,
-  dense2Mlp: MUDD_DENSE2_MLP_OFFSET,
-  bias: MUDD_BIAS_OFFSET,
-  biasMlp: MUDD_BIAS_MLP_OFFSET,
-} as const;
-
-export type LoadedLimiteQ4Artifact = {
-  readonly manifest: LimiteQ4Manifest;
-  readonly shards: readonly GPUBuffer[];
-  readonly smallWeights: GPUBuffer;
-  readonly smallValues: Float32Array;
-  readonly smallLayout: typeof SMALL_TENSOR_LAYOUT;
-  destroy(): void;
-};
-
 type Range = { readonly start: number; readonly end: number; readonly label: string };
 type ExpectedQ4 = {
   readonly shape: readonly [number, number];
@@ -349,62 +314,27 @@ export function validateLimiteQ4Manifest(value: unknown): LimiteQ4Manifest {
   return deepFreeze(root) as unknown as LimiteQ4Manifest;
 }
 
-export async function loadLimiteQ4Artifact(
-  device: GPUDevice,
+
+/** Consume one verified shard at a time without coupling storage to an inference backend. */
+export async function readLimiteQ4Shards(
+  consume: (manifest: LimiteQ4Manifest, index: number, bytes: Uint8Array<ArrayBuffer>) => void | Promise<void>,
   onProgress: LimiteArtifactProgressCallback = () => {},
-): Promise<LoadedLimiteQ4Artifact> {
+): Promise<LimiteQ4Manifest> {
   onProgress({ phase: "manifest" });
   const manifestBytes = await loadModelMetadata(LIMITE_MANIFEST_URL, LIMITE_MANIFEST_SHA256, "model manifest");
   const manifest = validateLimiteQ4Manifest(JSON.parse(new TextDecoder().decode(manifestBytes)));
   await removeStaleCachedShards(manifest.shards);
   const totalBytes = manifest.shards.reduce((total, shard) => total + shard.byteLength, 0);
-  const smallValues = new Float32Array(SMALL_TENSOR_ELEMENTS);
-  const shards: GPUBuffer[] = [];
   let loadedBytes = 0;
-
-  try {
-    for (let shardIndex = 0; shardIndex < manifest.shards.length; shardIndex++) {
-      const shard = manifest.shards[shardIndex];
-      const url = new URL(shard.url, LIMITE_MANIFEST_URL).href;
-      const bytes = await fetchShard(
-        url,
-        shard,
-        shardIndex,
-        totalBytes,
-        loadedBytes,
-        onProgress,
-      );
-      extractSmallTensors(manifest, shardIndex, bytes, smallValues);
-      const buffer = immutableStorageBuffer(device, bytes, `Limite Q4 ${shard.file}`);
-      shards.push(buffer);
-      loadedBytes += bytes.byteLength;
-    }
-
-    const smallBuffer = immutableStorageBuffer(
-      device,
-      new Uint8Array(smallValues.buffer),
-      "Limite f32 small tensors",
-    );
-    const immutableShards = Object.freeze(shards.slice());
-    let destroyed = false;
-
-    return Object.freeze({
-      manifest,
-      shards: immutableShards,
-      smallWeights: smallBuffer,
-      smallValues,
-      smallLayout: SMALL_TENSOR_LAYOUT,
-      destroy() {
-        if (destroyed) return;
-        destroyed = true;
-        for (const shard of immutableShards) shard.destroy();
-        smallBuffer.destroy();
-      },
-    });
-  } catch (error) {
-    for (const shard of shards) shard.destroy();
-    throw error;
+  for (let shardIndex = 0; shardIndex < manifest.shards.length; shardIndex++) {
+    const shard = manifest.shards[shardIndex];
+    const url = new URL(shard.url, LIMITE_MANIFEST_URL).href;
+    const bytes = await fetchShard(url, shard, shardIndex, totalBytes, loadedBytes, onProgress);
+    await consume(manifest, shardIndex, bytes);
+    loadedBytes += bytes.byteLength;
   }
+
+  return manifest;
 }
 
 async function fetchShard(
@@ -576,99 +506,6 @@ async function shardMatchesHash(
   return hex === shard.sha256;
 }
 
-function immutableStorageBuffer(device: GPUDevice, bytes: Uint8Array, label: string): GPUBuffer {
-  if (bytes.byteLength === 0 || bytes.byteLength % 4 !== 0) {
-    throw new Error(`${label} byte length must be a positive multiple of four.`);
-  }
-  const buffer = device.createBuffer({
-    label,
-    size: bytes.byteLength,
-    usage: GPUBufferUsage.STORAGE,
-    mappedAtCreation: true,
-  });
-  new Uint8Array(buffer.getMappedRange()).set(bytes);
-  buffer.unmap();
-  return buffer;
-}
-
-function extractSmallTensors(
-  manifest: LimiteQ4Manifest,
-  shardIndex: number,
-  shardBytes: Uint8Array,
-  destination: Float32Array,
-): void {
-  for (let layer = 0; layer < LAYER_COUNT; layer++) {
-    copyF32(
-      manifest.tensors[`layers.${layer}.xsa_alpha`] as LimiteSmallTensorManifest,
-      shardIndex,
-      shardBytes,
-      destination,
-      SMALL_TENSOR_LAYOUT.xsa + layer * QUERY_HEADS,
-    );
-    copyF32(
-      manifest.tensors[`layers.${layer}.lambdas`] as LimiteSmallTensorManifest,
-      shardIndex,
-      shardBytes,
-      destination,
-      SMALL_TENSOR_LAYOUT.lambdas + layer * 4,
-    );
-  }
-
-  copyF32(
-    manifest.tensors["mudd.dense1"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.dense1,
-  );
-  copyF32(
-    manifest.tensors["mudd.dense2"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.dense2,
-  );
-  copyF32(
-    manifest.tensors["mudd.dense2_mlp"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.dense2Mlp,
-  );
-  copyF32(
-    manifest.tensors["mudd.bias"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.bias,
-  );
-  copyF32(
-    manifest.tensors["mudd.bias_mlp"] as LimiteSmallTensorManifest,
-    shardIndex,
-    shardBytes,
-    destination,
-    SMALL_TENSOR_LAYOUT.biasMlp,
-  );
-}
-
-function copyF32(
-  tensor: LimiteSmallTensorManifest,
-  shardIndex: number,
-  shardBytes: Uint8Array,
-  destination: Float32Array,
-  destinationOffset: number,
-): void {
-  if (tensor.shard !== shardIndex) return;
-  const view = new DataView(
-    shardBytes.buffer,
-    shardBytes.byteOffset + tensor.offset,
-    tensor.byteLength,
-  );
-  const length = tensor.byteLength / 4;
-  for (let index = 0; index < length; index++) {
-    destination[destinationOffset + index] = view.getFloat32(index * 4, true);
-  }
-}
 
 function validateSource(value: unknown): void {
   const source = objectAt(value, "manifest.source");

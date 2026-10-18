@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import mmap
+import shutil
 import struct
 import sys
 import time

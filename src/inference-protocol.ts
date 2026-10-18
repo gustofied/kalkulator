@@ -5,7 +5,6 @@ export type RunTimings = {
   tokenizerReadMs?: number;
   tokenizerParseMs?: number;
   artifactMs?: number;
-  pipelineMs?: number;
   prefillMs?: number;
   firstTokenMs?: number;
   totalMs?: number;

@@ -1,4 +1,4 @@
-import { LimiteWebGpuEngine } from "./limite-engine/engine";
+import { LimiteJaxEngine } from "./jax-engine";
 import {
   LIMITE_CONTEXT_TOKENS,
   LIMITE_DECODE_BATCH_SIZE,
@@ -32,7 +32,7 @@ type GenerationResult = {
   readonly reason: CompletionReason;
 };
 
-let engine: LimiteWebGpuEngine | null = null;
+let engine: LimiteJaxEngine | null = null;
 let tokenizer: ViolettoTokenizer | null = null;
 let busy = false;
 let activeRunId: number | null = null;
@@ -186,7 +186,7 @@ async function advanceGeneration(saved: PausedGeneration): Promise<void> {
 
 async function* generate(
   runId: number,
-  activeEngine: LimiteWebGpuEngine,
+  activeEngine: LimiteJaxEngine,
   activeTokenizer: ViolettoTokenizer,
   first: number,
   outputBudget: number,
@@ -296,7 +296,7 @@ async function setup(timings: RunTimings, runId?: number): Promise<void> {
 
   // Validate the small language asset before allocating or downloading GPU weights.
   tokenizer ??= await loadTokenizer(timings, runId);
-  engine ??= await LimiteWebGpuEngine.create((progress) => {
+  engine ??= await LimiteJaxEngine.create((progress) => {
     if (progress.phase === "manifest") {
       postStatus("preparing weights", undefined, runId);
       return;
@@ -312,7 +312,6 @@ async function setup(timings: RunTimings, runId?: number): Promise<void> {
   });
   timings.deviceMs = engine.timings.deviceMs;
   timings.artifactMs = engine.timings.artifactMs;
-  timings.pipelineMs = engine.timings.pipelineMs;
   void engine.device.lost.then(() => {
     postMessage({
       type: "error",

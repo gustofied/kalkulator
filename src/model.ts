@@ -1,6 +1,7 @@
-// Development-only JAX.js architecture reference. The app uses limite-engine.
-import { blockUntilReady, jit, nn, numpy as np, tree } from "@jax-js/jax";
-import { safetensors, WeightMapper } from "@jax-js/loaders";
+// Violetto's architecture, expressed as JAX.js array operations.
+import { blockUntilReady, jit, lax, nn, numpy as np, tree } from "@jax-js/jax";
+import { q4Embedding, q4Linear, type Q4Linear } from "./jax-q4";
+import { readLimiteQ4Shards, type LimiteArtifactProgressCallback } from "./model-artifact";
 
 const C = {
   vocab: 151_680,
@@ -18,24 +19,14 @@ const C = {
   cacheBlock: 256,
 } as const;
 
-type Linear = { weight: np.Array };
 type Attention = {
-  qkvProj?: Linear;
-  qProj?: Linear;
-  kProj?: Linear;
-  vProj?: Linear;
-  oProj: Linear;
-  qkvScale: np.Array;
-  oScale: np.Array;
-  xsaAlpha: np.Array;
-  attnGate?: np.Array;
-  veGate?: np.Array;
+  qkvProj: Q4Linear;
+  oProj: Q4Linear;
+  xsaFactor: np.Array;
 };
 type MLP = {
-  gateUpProj?: Linear;
-  gateProj?: Linear;
-  upProj?: Linear;
-  downProj: Linear;
+  gateUpProj: Q4Linear;
+  downProj: Q4Linear;
 };
 type Layer = {
   selfAttn: Attention;
@@ -53,8 +44,8 @@ type Mudd = {
   biasMlp: np.Array;
 };
 export type LimiteModel = {
-  embedTokens: Linear;
-  valueEmbeds: Linear;
+  embedTokens: Q4Linear;
+  valueEmbeds: Q4Linear;
   layers: Layer[];
   mudd: Mudd;
 };
@@ -64,70 +55,55 @@ export type LimiteState = { caches: KV[]; position: number; capacity: number };
 const GLOBAL = new Set([3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]);
 const VALUE = new Set([1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46]);
 
-const runLinear = jit(function runLinear(linear: Linear, x: np.Array): np.Array {
-  return np.dot(x, linear.weight.transpose());
-});
-
-const rmsNorm = jit(function rmsNorm(x: np.Array): np.Array {
+function rmsNorm(x: np.Array): np.Array {
   const dtype = x.dtype;
   x = x.astype(np.float32);
   const meanSquare = x.ref.mul(x.ref).mean(-1, { keepdims: true });
   return x.div(np.sqrt(meanSquare.add(C.rmsEps))).astype(dtype);
-});
-
-function project(linear: Linear, scale: np.Array, x: np.Array): np.Array {
-  return runLinear(linear, x).mul(scale);
 }
 
 function projectAttention(
   attn: Attention,
   hidden: np.Array,
 ): {
-  query: np.Array;
-  key: np.Array;
+  queryKey: np.Array;
   value: np.Array;
   attentionGate: np.Array;
   valueGate?: np.Array;
 } {
-  if (attn.qkvProj) {
-    const projected = runLinear(attn.qkvProj, hidden);
-    const qEnd = C.heads * C.headDim;
-    const kEnd = qEnd + C.kvHeads * C.headDim;
-    const vEnd = kEnd + C.kvHeads * C.headDim;
-    const gateEnd = vEnd + C.heads;
-    const qkv = projected.ref.slice([], [0, vEnd]).mul(attn.qkvScale);
-    return {
-      query: qkv.ref.slice([], [0, qEnd]),
-      key: qkv.ref.slice([], [qEnd, kEnd]),
-      value: qkv.slice([], [kEnd]),
-      attentionGate: projected.ref.slice([], [vEnd, gateEnd]),
-      valueGate:
-        projected.shape[1] > gateEnd
-          ? projected.slice([], [gateEnd])
-          : undefined,
-    };
-  }
-  const attentionChannels = np.take(
-    hidden.ref,
-    np.arange(128, undefined, undefined, { dtype: np.uint32 }),
-    -1,
-  );
-  const valueChannels = attn.veGate
-    ? np.take(
-        hidden.ref,
-        np.arange(12, undefined, undefined, { dtype: np.uint32 }),
-        -1,
-      )
-    : undefined;
+  const T = hidden.shape[0];
+  const projected = q4Linear(attn.qkvProj, hidden);
+  const qEnd = C.heads * C.headDim;
+  const kEnd = qEnd + C.kvHeads * C.headDim;
+  const vEnd = kEnd + C.kvHeads * C.headDim;
+  const gateEnd = vEnd + C.heads;
+  // The artifact has already folded QKV/O scales into the packed weights.
+  // Q and K have the same per-head normalization. Keep them together so JAX
+  // can normalize and rotate both in one set of GPU operations.
+  const queryKey = rmsNorm(projected.ref.slice([], [0, kEnd])
+    .reshape([T, C.heads + C.kvHeads, C.headDim]));
+  const value = projected.ref.slice([], [kEnd, vEnd]);
+  const valueGate = projected.shape[1] > gateEnd ? projected.ref.slice([], [gateEnd]) : undefined;
+  const attentionGate = projected.slice([], [vEnd, gateEnd]);
   return {
-    query: project(attn.qProj!, attn.qkvScale.ref, hidden.ref),
-    key: project(attn.kProj!, attn.qkvScale.ref, hidden.ref),
-    value: project(attn.vProj!, attn.qkvScale, hidden.ref),
-    attentionGate: np.dot(attentionChannels, attn.attnGate!.transpose()),
-    valueGate: valueChannels
-      ? np.dot(valueChannels, attn.veGate!.transpose())
-      : undefined,
+    queryKey,
+    value,
+    attentionGate,
+    valueGate,
   };
+}
+
+/** Round finite FP32 values to BF16, retaining FP32 storage for WebGPU. */
+function roundBfloat16(values: np.Array): np.Array {
+  const bits = lax.bitcastConvertType(values, np.uint32);
+  const tiesToEven = np.bitwiseAnd(
+    np.rightShift(bits.ref, np.array(16, { dtype: np.uint32 })),
+    np.array(1, { dtype: np.uint32 }),
+  );
+  const rounded = bits.add(tiesToEven.add(np.array(0x7fff, { dtype: np.uint32 })));
+  return lax.bitcastConvertType(
+    np.bitwiseAnd(rounded, np.array(0xffff0000, { dtype: np.uint32 })), np.float32,
+  );
 }
 
 const makeRoPEFactors = jit(
@@ -142,8 +118,10 @@ const makeRoPEFactors = jit(
       .add(offset)
       .reshape([length, 1]);
     const theta = positions.mul(frequency.reshape([1, C.headDim]));
-    const cosine = np.cos(theta.ref).reshape([length, 1, C.headDim]);
-    let sine = np.sin(theta);
+    // The checkpoint specifies BF16 trigonometric factors even when the
+    // surrounding attention arithmetic uses FP32.
+    const cosine = roundBfloat16(np.cos(theta.ref)).reshape([length, 1, C.headDim]);
+    let sine = roundBfloat16(np.sin(theta));
     const odd = np
       .remainder(np.arange(C.headDim), 2)
       .equal(1)
@@ -157,28 +135,14 @@ const makeRoPEFactors = jit(
 );
 
 function applyRoPE(
-  q: np.Array,
-  k: np.Array,
+  queryKey: np.Array,
   cosine: np.Array,
   sine: np.Array,
-): [np.Array, np.Array] {
-  const [T, qHeads, D] = q.shape;
-  const kHeads = k.shape[1];
-
-  const qPaired = np.flip(q.ref.reshape([T, qHeads, D / 2, 2]), -1).reshape([
-    T,
-    qHeads,
-    D,
-  ]);
-  const kPaired = np.flip(k.ref.reshape([T, kHeads, D / 2, 2]), -1).reshape([
-    T,
-    kHeads,
-    D,
-  ]);
-  return [
-    q.mul(cosine.ref).add(qPaired.mul(sine.ref)),
-    k.mul(cosine).add(kPaired.mul(sine)),
-  ];
+): np.Array {
+  const [T, heads, D] = queryKey.shape;
+  const paired = np.flip(queryKey.ref.reshape([T, heads, D / 2, 2]), -1)
+    .reshape([T, heads, D]);
+  return queryKey.mul(cosine).add(paired.mul(sine));
 }
 
 function applyValueEmbedding(
@@ -202,9 +166,7 @@ function applyXsa(attn: Attention, output: np.Array, currentValues: np.Array): n
   const projection = grouped.ref
     .mul(direction.ref)
     .sum(-1, { keepdims: true });
-  const alpha = np
-    .tanh(attn.xsaAlpha)
-    .reshape([1, C.kvHeads, C.groups, 1]);
+  const alpha = attn.xsaFactor.reshape([1, C.kvHeads, C.groups, 1]);
   return grouped
     .sub(alpha.mul(projection).mul(direction))
     .reshape([T, C.heads, C.headDim]);
@@ -225,18 +187,8 @@ function attentionPrefill(
   hasValueEmbedding: boolean,
 ): { output: np.Array; key: np.Array; value: np.Array } {
   const T = hidden.shape[0];
-  const projected = projectAttention(attn, hidden.ref);
-  let { query: q, key: k, value: v } = projected;
-  q = q.reshape([
-    T,
-    C.heads,
-    C.headDim,
-  ]);
-  k = k.reshape([
-    T,
-    C.kvHeads,
-    C.headDim,
-  ]);
+  const projected = projectAttention(attn, hidden);
+  let { queryKey, value: v } = projected;
   v = v.reshape([
     T,
     C.kvHeads,
@@ -244,11 +196,14 @@ function attentionPrefill(
   ]);
   if (hasValueEmbedding) {
     v = applyValueEmbedding(projected.valueGate!, valueEmbeds, v);
+  } else {
+    valueEmbeds.dispose();
   }
   const currentValues = v.ref;
-  q = rmsNorm(q);
-  k = rmsNorm(k);
-  if (!isGlobal) [q, k] = applyRoPE(q, k, ropeCosine, ropeSine);
+  if (!isGlobal) queryKey = applyRoPE(queryKey, ropeCosine, ropeSine);
+  else { ropeCosine.dispose(); ropeSine.dispose(); }
+  const q = queryKey.ref.slice([], [0, C.heads]);
+  const k = queryKey.slice([], [C.heads]);
 
   let output = nn.dotProductAttention(q, k.ref, v.ref, {
     isCausal: true,
@@ -257,9 +212,8 @@ function attentionPrefill(
   });
   output = applyXsa(attn, output, currentValues);
   output = applyAttentionGate(projected.attentionGate, output);
-  output = project(
+  output = q4Linear(
     attn.oProj,
-    attn.oScale,
     output.reshape([T, C.heads * C.headDim]),
   );
   return { output, key: k, value: v };
@@ -272,24 +226,13 @@ function attentionStep(
   valueEmbeds: np.Array,
   ropeCosine: np.Array,
   ropeSine: np.Array,
-  position: number,
-  slot: number,
-  validLength: number,
+  slot: np.Array,
+  validLength: np.Array,
   isGlobal: boolean,
   hasValueEmbedding: boolean,
 ): { output: np.Array; cache: KV } {
-  const projected = projectAttention(attn, hidden.ref);
-  let { query: q, key: k, value: v } = projected;
-  q = q.reshape([
-    1,
-    C.heads,
-    C.headDim,
-  ]);
-  k = k.reshape([
-    1,
-    C.kvHeads,
-    C.headDim,
-  ]);
+  const projected = projectAttention(attn, hidden);
+  let { queryKey, value: v } = projected;
   v = v.reshape([
     1,
     C.kvHeads,
@@ -297,52 +240,71 @@ function attentionStep(
   ]);
   if (hasValueEmbedding) {
     v = applyValueEmbedding(projected.valueGate!, valueEmbeds, v);
+  } else {
+    valueEmbeds.dispose();
   }
   const currentValues = v.ref;
-  q = rmsNorm(q);
-  k = rmsNorm(k);
-  if (!isGlobal) [q, k] = applyRoPE(q, k, ropeCosine, ropeSine);
+  if (!isGlobal) queryKey = applyRoPE(queryKey, ropeCosine, ropeSine);
+  else { ropeCosine.dispose(); ropeSine.dispose(); }
+  const q = queryKey.ref.slice([], [0, C.heads]);
+  const k = queryKey.slice([], [C.heads]);
 
   const capacity = cache.data.shape[0];
   const slotMask = np.arange(capacity).equal(slot).reshape([capacity, 1, 1, 1]);
-  const update = np.stack([k, v], 1);
+  const update = np.stack([k, v], 1).astype(np.float16);
   const data = np.where(
     slotMask,
     np.tile(update, [capacity, 1, 1, 1]),
     cache.data,
   );
-  const key = data.ref.slice([], 0);
-  const value = data.ref.slice([], 1);
-  let mask = np.arange(capacity).less(validLength);
-  if (!isGlobal) {
-    mask = mask.mul(
-      np.arange(capacity).greaterEqual(position - C.slidingWindow),
-    );
-  }
-  let output = nn.dotProductAttention(q, key, value, {
-    mask,
-    scale: C.attentionScale,
-  });
+  let output = decodeAttention(q, data.ref, validLength);
   output = applyXsa(attn, output, currentValues);
   output = applyAttentionGate(projected.attentionGate, output);
-  output = project(
+  output = q4Linear(
     attn.oProj,
-    attn.oScale,
     output.reshape([1, C.heads * C.headDim]),
   );
   return { output, cache: { data } };
 }
 
+/** Grouped attention with parallel, bounded-length cache reductions. */
+function decodeAttention(query: np.Array, data: np.Array, validLength: np.Array): np.Array {
+  const length = data.shape[0];
+  // Keep cache views in FP16 through indexing and padding. The FP32 query and
+  // probabilities promote the products, without expanding the entire cache.
+  const key = data.ref.slice([], 0);
+  const value = data.slice([], 1);
+  // A single query has only ten heads. Small cache tiles expose enough
+  // independent reductions to occupy the GPU; longer global caches use
+  // larger tiles to keep the final reduction and scratch space bounded.
+  const blockSize = length <= C.slidingWindow + 1 ? 16 : 128;
+  const padded = Math.ceil(length / blockSize) * blockSize;
+  const blocks = padded / blockSize;
+  const scores = np.einsum(
+    "kgd,skd->kgs", query.reshape([C.kvHeads, C.groups, C.headDim]), key,
+  ).mul(C.attentionScale);
+  // Mask after padding: padded slots must never contribute to softmax.
+  const masked = np.where(
+    np.arange(padded).less(validLength),
+    np.pad(scores, { 2: [0, padded - length] }),
+    -Infinity,
+  ).reshape([C.kvHeads, C.groups, blocks, blockSize]);
+  const maximum = masked.ref.max(-1, { keepdims: true }).max(-2, { keepdims: true });
+  const masses = np.exp(masked.sub(maximum));
+  const total = masses.ref.sum(-1, { keepdims: true }).sum(-2, { keepdims: true });
+  const probabilities = masses.div(total);
+  const values = np.pad(value, { 0: [0, padded - length] })
+    .reshape([blocks, blockSize, C.kvHeads, C.headDim]).transpose([2, 0, 1, 3]);
+  return probabilities.reshape([C.kvHeads, C.groups, blocks, blockSize, 1])
+    .mul(values.reshape([C.kvHeads, 1, blocks, blockSize, C.headDim]))
+    .sum(-2).sum(-2).reshape([1, C.heads, C.headDim]);
+}
+
 function runMlp(mlp: MLP, hidden: np.Array): np.Array {
-  if (mlp.gateUpProj) {
-    const gateUp = runLinear(mlp.gateUpProj, hidden);
-    const gate = nn.silu(gateUp.ref.slice([], [0, C.intermediate]));
-    const up = gateUp.slice([], [C.intermediate]);
-    return runLinear(mlp.downProj, gate.mul(up));
-  }
-  const gate = nn.silu(runLinear(mlp.gateProj!, hidden.ref));
-  const up = runLinear(mlp.upProj!, hidden);
-  return runLinear(mlp.downProj, gate.mul(up));
+  const gateUp = q4Linear(mlp.gateUpProj, hidden);
+  const gate = nn.silu(gateUp.ref.slice([], [0, C.intermediate]));
+  const up = gateUp.slice([], [C.intermediate]);
+  return q4Linear(mlp.downProj, gate.mul(up));
 }
 
 function padCache(data: np.Array, capacity: number): KV {
@@ -382,94 +344,93 @@ const runLayerPrefill = jit(
     const result = mixed
       .mul(layer.residLambdaMlp)
       .add(mlp.mul(layer.postLambdaMlp));
-    return [result, padCache(np.stack([key, value], 1), capacity)];
+    let data = np.stack([key, value], 1).astype(np.float16);
+    if (!isGlobal && data.shape[0] > C.slidingWindow + 1) {
+      const count = C.slidingWindow + 1;
+      const first = data.shape[0] - count;
+      const slots = np.remainder(np.arange(count).sub(first % count).add(count), count).add(first);
+      data = np.take(data, slots, 0);
+    }
+    return [result, padCache(data, isGlobal ? capacity : Math.min(capacity, C.slidingWindow + 1))];
   },
   { staticArgnums: [6, 7, 8] },
 );
 
-const runLayerStep = jit(
-  function runLayerStep(
-    layer: Layer,
-    cache: KV,
-    attentionInput: np.Array,
-    residualBase: np.Array,
-    valueEmbeds: np.Array,
-    ropeCosine: np.Array,
-    ropeSine: np.Array,
-    position: number,
-    slot: number,
-    validLength: number,
-    isGlobal: boolean,
-    hasValueEmbedding: boolean,
-  ): [np.Array, KV] {
-    const { output, cache: nextCache } = attentionStep(
-      layer.selfAttn,
-      cache,
-      attentionInput,
-      valueEmbeds,
-      ropeCosine,
-      ropeSine,
-      position,
-      slot,
-      validLength,
-      isGlobal,
-      hasValueEmbedding,
-    );
-    const mixed = residualBase
-      .mul(layer.residLambdaAttn)
-      .add(output.mul(layer.postLambdaAttn));
-    const mlp = runMlp(layer.mlp, rmsNorm(mixed.ref));
-    const result = mixed
-      .mul(layer.residLambdaMlp)
-      .add(mlp.mul(layer.postLambdaMlp));
-    return [result, nextCache];
-  },
-  { staticArgnums: [10, 11] },
-);
+function runLayerStep(
+  layer: Layer,
+  cache: KV,
+  attentionInput: np.Array,
+  residualBase: np.Array,
+  valueEmbeds: np.Array,
+  ropeCosine: np.Array,
+  ropeSine: np.Array,
+  slot: np.Array,
+  validLength: np.Array,
+  isGlobal: boolean,
+  hasValueEmbedding: boolean,
+): [np.Array, KV] {
+  const { output, cache: nextCache } = attentionStep(
+    layer.selfAttn,
+    cache,
+    attentionInput,
+    valueEmbeds,
+    ropeCosine,
+    ropeSine,
+    slot,
+    validLength,
+    isGlobal,
+    hasValueEmbedding,
+  );
+  const mixed = residualBase
+    .mul(layer.residLambdaAttn)
+    .add(output.mul(layer.postLambdaAttn));
+  const mlp = runMlp(layer.mlp, rmsNorm(mixed.ref));
+  const result = mixed
+    .mul(layer.residLambdaMlp)
+    .add(mlp.mul(layer.postLambdaMlp));
+  return [result, nextCache];
+}
 
-const runMuddPair = jit(
-  function runMuddPair(
-    mudd: Mudd,
-    tap0: np.Array,
-    tap1: np.Array,
-    tap2: np.Array,
-    current: np.Array,
-    layerIndex: number,
-  ): [np.Array, np.Array] {
-    const T = current.shape[0];
-    const inner = nn.gelu(
-      np.dot(rmsNorm(current), mudd.dense1.transpose()),
-      { approximate: false },
-    );
-    const makeMix = (
-      dense2: np.Array,
-      bias: np.Array,
-      retainInputs: boolean,
-    ): np.Array => {
-      const weights = np
-        .dot(
-          retainInputs ? inner.ref : inner,
-          dense2.slice(layerIndex).transpose(),
-        )
-        .add(bias.slice(layerIndex));
-      const i0 = np.array(0, { dtype: np.uint32 });
-      const i1 = np.array(1, { dtype: np.uint32 });
-      const i2 = np.array(2, { dtype: np.uint32 });
-      const a = retainInputs ? tap0.ref : tap0;
-      const b = retainInputs ? tap1.ref : tap1;
-      const c = retainInputs ? tap2.ref : tap2;
-      return a
-        .mul(np.take(weights.ref, i0, -1).reshape([T, 1]))
-        .add(b.mul(np.take(weights.ref, i1, -1).reshape([T, 1])))
-        .add(c.mul(np.take(weights, i2, -1).reshape([T, 1])));
-    };
-    return [
-      makeMix(mudd.dense2, mudd.bias, true),
-      makeMix(mudd.dense2Mlp, mudd.biasMlp, false),
-    ];
-  },
-  { staticArgnums: [5] },
-);
+function runMuddPair(
+  mudd: Mudd,
+  tap0: np.Array,
+  tap1: np.Array,
+  tap2: np.Array,
+  current: np.Array,
+  layerIndex: number,
+): [np.Array, np.Array] {
+  const T = current.shape[0];
+  const inner = nn.gelu(
+    np.dot(rmsNorm(current), mudd.dense1.transpose()),
+    { approximate: false },
+  );
+  const makeMix = (
+    dense2: np.Array,
+    bias: np.Array,
+    retainInputs: boolean,
+  ): np.Array => {
+    const weights = np
+      .dot(
+        retainInputs ? inner.ref : inner,
+        dense2.slice(layerIndex).transpose(),
+      )
+      .add(bias.slice(layerIndex));
+    const i0 = np.array(0, { dtype: np.uint32 });
+    const i1 = np.array(1, { dtype: np.uint32 });
+    const i2 = np.array(2, { dtype: np.uint32 });
+    const a = retainInputs ? tap0.ref : tap0;
+    const b = retainInputs ? tap1.ref : tap1;
+    const c = retainInputs ? tap2.ref : tap2;
+    return a
+      .mul(np.take(weights.ref, i0, -1).reshape([T, 1]))
+      .add(b.mul(np.take(weights.ref, i1, -1).reshape([T, 1])))
+      .add(c.mul(np.take(weights, i2, -1).reshape([T, 1])));
+  };
+  return [
+    makeMix(mudd.dense2, mudd.bias, true),
+    makeMix(mudd.dense2Mlp, mudd.biasMlp, false),
+  ];
+}
 
 function roundCapacity(required: number): number {
   return Math.max(C.cacheBlock, Math.ceil(required / C.cacheBlock) * C.cacheBlock);
@@ -489,9 +450,15 @@ export function createState(capacity: number = C.cacheBlock): LimiteState {
 function ensureCapacity(state: LimiteState, required: number): void {
   if (state.capacity >= required) return;
   const old = state.capacity;
-  const next = roundCapacity(required);
-  for (const cache of state.caches) {
-    cache.data = np.pad(cache.data, { 0: [0, next - old] });
+  const next = roundCapacity(Math.max(required, old * 2));
+  for (let i = 0; i < state.caches.length; i++) {
+    // Grow local caches with the prefix, then retain the full logical ring.
+    // Before the first wrap, this avoids scanning and copying empty slots.
+    const capacity = GLOBAL.has(i) ? next : Math.min(next, C.slidingWindow + 1);
+    const cache = state.caches[i];
+    if (cache.data.shape[0] < capacity) {
+      cache.data = np.pad(cache.data, { 0: [0, capacity - cache.data.shape[0]] });
+    }
   }
   state.capacity = next;
 }
@@ -519,7 +486,7 @@ function layerInputs(
   if (layerIndex === 47) {
     if (!history23) throw new Error("Missing MUDD tap 23");
     const [attentionMix, residualMix] = runMuddPair(
-      model.mudd,
+      tree.ref(model.mudd),
       history0.ref,
       history23.ref,
       hidden.ref,
@@ -531,14 +498,13 @@ function layerInputs(
   return [rmsNorm(hidden.ref), hidden.ref];
 }
 
-export function logitsFromHidden(model: LimiteModel, hidden: np.Array): np.Array {
-  // Violetto's sigmoid softcap is strictly monotonic, so top-k can operate on
-  // raw logits. The sampler applies the softcap to only the 50 survivors.
-  return runLinear(model.embedTokens, hidden).astype(np.float32).reshape([C.vocab]);
-}
+const runHead = jit((linear: Q4Linear, hidden: np.Array): np.Array =>
+  q4Linear(linear, hidden).reshape([C.vocab]),
+);
 
-export function lmHeadWeight(model: LimiteModel): np.Array {
-  return model.embedTokens.weight;
+export function logitsFromHidden(model: LimiteModel, hidden: np.Array): np.Array {
+  // Return raw logits; the sampler must softcap the complete valid vocabulary.
+  return runHead(tree.ref(model.embedTokens), hidden);
 }
 
 export function prefill(
@@ -546,16 +512,22 @@ export function prefill(
   tokenIds: np.Array,
   state: LimiteState,
 ): np.Array {
-  ensureCapacity(state, tokenIds.shape[0]);
-  let hidden = model.embedTokens.weight.ref.slice(tokenIds.ref).astype(np.float32);
+  const promptLength = tokenIds.shape[0];
+  // Reuse compiled prefill shapes between short problems. Causal padding never
+  // enters the valid cache prefix, and decode overwrites it as it advances.
+  const sequenceLength = promptLength <= 256
+    ? 2 ** Math.ceil(Math.log2(promptLength)) : promptLength;
+  if (sequenceLength !== promptLength) {
+    tokenIds = np.pad(tokenIds, [[0, sequenceLength - promptLength]]);
+  }
+  ensureCapacity(state, sequenceLength);
+  let hidden = q4Embedding(tree.ref(model.embedTokens), tokenIds.ref);
   hidden = rmsNorm(hidden);
-  const valueEmbeds = model.valueEmbeds.weight
-    .slice(tokenIds)
-    .astype(np.float32)
+  const valueEmbeds = q4Embedding(tree.ref(model.valueEmbeds), tokenIds)
     .reshape([hidden.shape[0], C.kvHeads, C.headDim]);
   const [ropeCosine, ropeSine] = makeRoPEFactors(
     np.array(0, { dtype: np.uint32 }),
-    tokenIds.shape[0],
+    sequenceLength,
   );
   const history0 = hidden.ref;
   let history12: np.Array | null = null;
@@ -573,7 +545,7 @@ export function prefill(
     state.caches[i]?.data.dispose();
     const previous = hidden;
     [hidden, state.caches[i]] = runLayerPrefill(
-      model.layers[i],
+      tree.ref(model.layers[i]),
       attentionInput,
       residualBase,
       valueEmbeds.ref,
@@ -583,13 +555,17 @@ export function prefill(
       VALUE.has(i),
       state.capacity,
     );
+    // Submit each layer without reading back to the CPU. Otherwise JAX's lazy
+    // graph retains unpacked Q4 weights from all 48 layers during prefill.
+    // Submission releases scratch references so the next layer can reuse them.
+    hidden.ref.gpuBufferSync();
     previous.dispose();
     if (i === 11) history12 = hidden.ref;
     if (i === 22) history23 = hidden.ref;
   }
 
-  hidden = rmsNorm(hidden).slice([-1]);
-  state.position = tokenIds.shape[0];
+  hidden = rmsNorm(hidden).slice(np.array([promptLength - 1], { dtype: np.int32 }));
+  state.position = promptLength;
   valueEmbeds.dispose();
   ropeCosine.dispose();
   ropeSine.dispose();
@@ -599,22 +575,35 @@ export function prefill(
   return hidden;
 }
 
-export function step(model: LimiteModel, token: number, state: LimiteState): np.Array {
+export function step(model: LimiteModel, token: number | np.Array, state: LimiteState): np.Array {
   ensureCapacity(state, state.position + 1);
-  const tokenIds = np.array([token], { dtype: np.uint32 });
-  let hidden = model.embedTokens.weight.ref.slice(tokenIds.ref).astype(np.float32);
+  const tokenIds = typeof token === "number"
+    ? np.array([token], { dtype: np.uint32 }) : token.reshape([1]);
+  const position = np.array(state.position, { dtype: np.uint32 });
+  const [hidden, caches] = runStep(tree.ref(model), state.caches, tokenIds, position);
+  state.caches = caches;
+  state.position++;
+  return hidden;
+}
+
+const runStep = jit(function runStep(
+  model: LimiteModel,
+  caches: KV[],
+  tokenIds: np.Array,
+  position: np.Array,
+): [np.Array, KV[]] {
+  let hidden = q4Embedding(tree.ref(model.embedTokens), tokenIds.ref);
   hidden = rmsNorm(hidden);
-  const valueEmbeds = model.valueEmbeds.weight
-    .slice(tokenIds)
-    .astype(np.float32)
+  const valueEmbeds = q4Embedding(tree.ref(model.valueEmbeds), tokenIds)
     .reshape([1, C.kvHeads, C.headDim]);
   const history0 = hidden.ref;
   let history12: np.Array | null = null;
   let history23: np.Array | null = null;
-  const position = state.position;
-  const positionArray = np.array(position, { dtype: np.uint32 });
-  const [ropeCosine, ropeSine] = makeRoPEFactors(positionArray.ref, 1);
-  positionArray.dispose();
+  const [ropeCosine, ropeSine] = makeRoPEFactors(position.ref, 1);
+  const localSlot = np.remainder(position.ref, C.slidingWindow + 1);
+  const validLength = position.ref.add(1);
+  const localLength = np.minimum(validLength.ref, C.slidingWindow + 1);
+  const nextCaches: KV[] = [];
 
   for (let i = 0; i < C.layers; i++) {
     const [attentionInput, residualBase] = layerInputs(
@@ -626,17 +615,16 @@ export function step(model: LimiteModel, token: number, state: LimiteState): np.
       history23,
     );
     const previous = hidden;
-    [hidden, state.caches[i]] = runLayerStep(
-      model.layers[i],
-      state.caches[i],
+    [hidden, nextCaches[i]] = runLayerStep(
+      tree.ref(model.layers[i]),
+      caches[i],
       attentionInput,
       residualBase,
       valueEmbeds.ref,
       ropeCosine.ref,
       ropeSine.ref,
-      position,
-      position,
-      position + 1,
+      GLOBAL.has(i) ? position.ref : localSlot.ref,
+      GLOBAL.has(i) ? validLength.ref : localLength.ref,
       GLOBAL.has(i),
       VALUE.has(i),
     );
@@ -646,129 +634,70 @@ export function step(model: LimiteModel, token: number, state: LimiteState): np.
   }
 
   hidden = rmsNorm(hidden);
-  state.position++;
   valueEmbeds.dispose();
   ropeCosine.dispose();
   ropeSine.dispose();
   history0.dispose();
   history12?.dispose();
   history23?.dispose();
-  return hidden;
-}
-
-const mapper = new WeightMapper({
-  prefix: { "model.": "" },
-  substring: {
-    embed_tokens: "embedTokens",
-    value_embeds: "valueEmbeds",
-    self_attn: "selfAttn",
-    q_proj: "qProj",
-    k_proj: "kProj",
-    v_proj: "vProj",
-    o_proj: "oProj",
-    qkv_scale: "qkvScale",
-    o_scale: "oScale",
-    xsa_alpha: "xsaAlpha",
-    attn_gate: "attnGate",
-    ve_gate: "veGate",
-    gate_proj: "gateProj",
-    up_proj: "upProj",
-    down_proj: "downProj",
-    resid_lambda_attn: "residLambdaAttn",
-    post_lambda_attn: "postLambdaAttn",
-    resid_lambda_mlp: "residLambdaMlp",
-    post_lambda_mlp: "postLambdaMlp",
-    dense2_mlp: "dense2Mlp",
-    bias_mlp: "biasMlp",
-  },
+  tree.dispose([model, position, localSlot, validLength, localLength]);
+  return [hidden, nextCaches];
 });
 
-function tensorToArray(tensor: safetensors.Tensor): np.Array {
-  if (tensor.dtype === "F16") {
-    return np.array(tensor.data as Float16Array<ArrayBuffer>, {
-      shape: tensor.shape,
-      dtype: np.float16,
+export async function loadQ4Model(onProgress?: LimiteArtifactProgressCallback): Promise<LimiteModel> {
+  const matrices: Record<string, Q4Linear> = {};
+  const small: Record<string, np.Array> = {};
+  try {
+    await readLimiteQ4Shards(async (manifest, index, bytes) => {
+      for (const [name, tensor] of Object.entries(manifest.tensors)) {
+        if (tensor.shard !== index) continue;
+        if (tensor.dtype === "q4_block32") {
+          matrices[name] = {
+            codes: np.array(new Uint32Array(bytes.buffer, bytes.byteOffset + tensor.offset, tensor.byteLength / 4), {
+              shape: [tensor.shape[0], tensor.shape[1] / 8],
+            }),
+            scales: np.array(new Float16Array(bytes.buffer, bytes.byteOffset + tensor.scaleOffset, tensor.scaleByteLength / 2), {
+              shape: [...tensor.scaleShape], dtype: np.float16,
+            }),
+          };
+          await blockUntilReady(matrices[name]);
+        } else {
+          small[name] = np.array(new Float32Array(bytes.buffer, bytes.byteOffset + tensor.offset, tensor.byteLength / 4), {
+            shape: [...tensor.shape],
+          });
+          await blockUntilReady(small[name]);
+        }
+      }
+    }, onProgress);
+    const layers = Array.from({ length: C.layers }, (_, index): Layer => {
+      const prefix = `layers.${index}`;
+      const lambdas = small[`${prefix}.lambdas`];
+      const layer = {
+        selfAttn: {
+          qkvProj: matrices[`${prefix}.qkv`], oProj: matrices[`${prefix}.o`],
+          // Projection scales and tanh(alpha) are already folded into the Q4 artifact.
+          xsaFactor: small[`${prefix}.xsa_alpha`],
+        },
+        mlp: { gateUpProj: matrices[`${prefix}.gate_up`], downProj: matrices[`${prefix}.down`] },
+        residLambdaAttn: lambdas.ref.slice(0), postLambdaAttn: lambdas.ref.slice(1),
+        residLambdaMlp: lambdas.ref.slice(2), postLambdaMlp: lambdas.slice(3),
+      };
+      delete small[`${prefix}.lambdas`];
+      return layer;
     });
-  }
-  if (tensor.dtype === "F32") {
-    return np.array(tensor.data as Float32Array<ArrayBuffer>, {
-      shape: tensor.shape,
-      dtype: np.float32,
-    });
-  }
-  throw new Error(`Unsupported checkpoint dtype ${tensor.dtype}`);
-}
-
-async function fuseProjectionWeights(model: LimiteModel): Promise<void> {
-  // Violetto's native inference graph uses a single QKV projection and a
-  // single gate/up projection. The browser artifact stores those matrices
-  // separately, so fuse them once after upload to remove matvec dispatches per
-  // layer and token. Gate weights are cast to the checkpoint dtype here, as
-  // the upstream evaluation path does before applying them.
-  const batchSize = 4;
-  for (let start = 0; start < model.layers.length; start += batchSize) {
-    const batch = model.layers.slice(start, start + batchSize).map((layer) => {
-      const attn = layer.selfAttn;
-      const mlp = layer.mlp;
-      const attentionGate = np.pad(
-        attn.attnGate!.ref.astype(np.float16),
-        { 1: [0, C.hidden - 128] },
-      );
-      const valueGate = attn.veGate
-        ? np.pad(attn.veGate.ref.astype(np.float16), {
-            1: [0, C.hidden - 12],
-          })
-        : null;
-      const qkv = np.concatenate(
-        [
-          attn.qProj!.weight.ref,
-          attn.kProj!.weight.ref,
-          attn.vProj!.weight.ref,
-          attentionGate,
-          ...(valueGate ? [valueGate] : []),
-        ],
-        0,
-      );
-      const gateUp = np.concatenate(
-        [mlp.gateProj!.weight.ref, mlp.upProj!.weight.ref],
-        0,
-      );
-      return { attn, mlp, qkv, gateUp };
-    });
-
-    await blockUntilReady(batch.map(({ qkv, gateUp }) => [qkv, gateUp]));
-    for (const { attn, mlp, qkv, gateUp } of batch) {
-      attn.qProj!.weight.dispose();
-      attn.kProj!.weight.dispose();
-      attn.vProj!.weight.dispose();
-      attn.attnGate!.dispose();
-      attn.veGate?.dispose();
-      mlp.gateProj!.weight.dispose();
-      mlp.upProj!.weight.dispose();
-      attn.qkvProj = { weight: qkv };
-      mlp.gateUpProj = { weight: gateUp };
-      delete attn.qProj;
-      delete attn.kProj;
-      delete attn.vProj;
-      delete attn.attnGate;
-      delete attn.veGate;
-      delete mlp.gateProj;
-      delete mlp.upProj;
-    }
+    return {
+      embedTokens: matrices.embed_tokens, valueEmbeds: matrices.value_embeds, layers,
+      mudd: { dense1: small["mudd.dense1"], dense2: small["mudd.dense2"],
+        dense2Mlp: small["mudd.dense2_mlp"], bias: small["mudd.bias"], biasMlp: small["mudd.bias_mlp"] },
+    };
+  } catch (error) {
+    tree.dispose(matrices); tree.dispose(small);
+    throw error;
   }
 }
 
-export async function loadModel(
-  data: Uint8Array<ArrayBuffer> | ArrayBuffer,
-): Promise<LimiteModel> {
-  const file = safetensors.parse(data);
-  const flat: Record<string, np.Array> = {};
-  for (const [key, tensor] of Object.entries(file.tensors)) {
-    flat[mapper.mapKey(key)] = tensorToArray(tensor);
-  }
-  const model = safetensors.toNested(flat) as LimiteModel;
-  if (model.layers.length !== C.layers) throw new Error("Incomplete checkpoint");
-  await blockUntilReady(model);
-  await fuseProjectionWeights(model);
-  return model;
+export function disposeState(state: LimiteState): void {
+  tree.dispose(state.caches);
+  state.caches = [];
+  state.position = 0;
 }

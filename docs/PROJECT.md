@@ -9,14 +9,14 @@ Run Paradigma's Violetto Limite 1B mathematics model entirely in a WebGPU browse
 - Source: <https://github.com/gustofied/kalkulator>
 - Live: <https://gustofied.github.io/kalkulator/>
 - App: static Vite/TypeScript, deployed to GitHub Pages by `.github/workflows/pages.yml`
-- Execution: one custom Q4 WebGPU runtime in a dedicated Web Worker
+- Execution: one JAX.js WebGPU runtime in a dedicated Web Worker
 - Artifact: six immutable binary shards, about 556 MiB total
 - Cache: each complete shard is stored in OPFS; a warm load reads the local copy instead of downloading it again
 - Interface: editorial black/violet UI with GSAP motion and KaTeX rendering
 
-There is no production JAX.js path, runtime probe, A/B switch, or fallback engine. [`src/model.ts`](../src/model.ts) remains the JAX.js reference implementation and architecture oracle.
+[`src/model.ts`](../src/model.ts) is the readable JAX.js architecture implementation used by the app. There are no hand-written inference shaders, runtime probes, A/B switches, or fallback engines.
 
-[`src/limite-config.ts`](../src/limite-config.ts) is the single serving policy: pinned Q4 artifact and tokenizer, context, sampling, batch size, and time limits. It has no URL parameters, model selector, or runtime overrides. JAX.js is a development dependency for the reference; only its loader package's tokenizer utility is used by the app.
+[`src/limite-config.ts`](../src/limite-config.ts) is the single serving policy: pinned Q4 artifact and tokenizer, context, sampling, batch size, and time limits. It has no URL parameters, model selector, or runtime overrides. JAX.js generates the GPU programs from array operations; fused Q4 unpacking, block scales, and row reductions keep decode weights compact in memory as well as on disk.
 
 ## Pinned model contract
 
@@ -48,7 +48,7 @@ Please reason step by step, and put your final answer within \boxed{}.<|im_end|>
 <|im_start|>assistant
 ```
 
-Generation uses temperature 0.6 and full-vocabulary top-p 0.95 on the GPU, without a top-k cutoff. Only the 151,667 tokenizer IDs are eligible; the 13 padded model rows are excluded. `src/limite-engine/sampler.ts` contains the single production sampler. Token ID 151643 is BOS, EOS, and PAD; `<|im_end|>` is not treated as EOS.
+Generation uses temperature 0.6 and full-vocabulary top-p 0.95 on the GPU, without a top-k cutoff. Only the 151,667 tokenizer IDs are eligible; the 13 padded model rows are excluded. `src/jax-sampler.ts` contains the single production sampler, using JAX.js sorting, prefix sums, and Threefry randomness. Token ID 151643 is BOS, EOS, and PAD; `<|im_end|>` is not treated as EOS.
 
 The runtime supports 131,072 context tokens and at most 126,976 output tokens, bounded by the space remaining after the prompt. These token budgets follow Paradigma's technical report. The notebook pauses after three minutes of active calculation, including the initial prefill; **continue** resumes the same decoder, KV cache, pending token batch, and random state without replaying the prompt. Waiting between segments is excluded from timing. Editing the problem starts a fresh calculation. Generation ends on EOS, the token budget, cancellation, or an exact sustained repetition cycle (at least 128 tokens and four copies); a prefill timeout cannot be continued. Interrupted output is never treated as a final answer. A boxed expression is not a stop token. There is no automatic retry or answer-forcing pass. A 150-second inactivity watchdog recovers a stalled worker, with a 15-second grace period beyond each segment's deadline if the worker cannot respond.
 
@@ -58,9 +58,9 @@ All working text stays in the six-line scrolling area. After EOS, the last compl
 
 The first visit downloads about 556 MiB of model data. Successful shards are cached in OPFS, stale artifact shards are removed, and later visits load the pinned artifact locally. Every downloaded or cached shard is checked against its manifest SHA-256; damaged cache entries are replaced. The browser still has to read the cached bytes, create GPU buffers, and compile pipelines on each page load. Private browsing, cleared site data, or insufficient storage quota can prevent persistence.
 
-Keys and values are stored as packed FP16 pairs; queries, reductions, softmax, and activations remain FP32. Global caches start at 4K tokens and grow geometrically while preserving the prefix. Local caches retain their fixed 1,025-slot rings. A new short solve releases an oversized global cache. Attention-cache storage is about 84 MiB initially, 228 MiB at 16K, and 1,572 MiB at 128K, excluding weights, scratch, and temporary allocations during growth. The maximum is a supported context budget, not a guarantee that every device has enough memory.
+Keys and values are stored as FP16 arrays; queries, reductions, softmax, and activations remain FP32. Caches start at 256 tokens and grow geometrically while preserving the prefix. Local caches stop growing at 1,025 slots and then retain that ring; the attention window is unchanged. A new solve releases the previous cache. Attention-cache storage is about 12 MiB initially, 228 MiB at 16K, and 1,572 MiB at 128K, excluding weights, scratch, and temporary allocations during growth. The maximum is a context budget, not a guarantee that every device has enough memory.
 
-Attention scores 32 keys in parallel per tile and merges four tiles per 128-key partition. RoPE factors are calculated only for the current decode batch, rather than allocating a full-context table. These are the only production kernels; no runtime benchmark or kernel selection is performed.
+Prefill handles at most 256 tokens in a parallel pass, then appends longer prompts through the same cache to bound attention workspace. RoPE factors are calculated only for the current positions and rounded to BF16, matching the checkpoint's trigonometric precision contract, while stored as FP32 for WebGPU. Decode is compiled as a JAX.js graph, and vocabulary sampling uses parallel block reductions. No runtime benchmark or kernel selection is performed.
 
 Performance depends on the GPU, browser, thermals, prompt length, and generated sequence length. Longer generation budgets permit longer solutions; they do not establish answer accuracy or shorter waiting times.
 
@@ -71,5 +71,5 @@ Reference: [Limite 1B Violetto technical report](https://paradigma.inc/research/
 - Keep the app browser-only and compatible with static GitHub Pages hosting.
 - Do not commit model weights to the application repository.
 - Keep all production artifact URLs revision-pinned.
-- Preserve `src/model.ts` as the readable JAX.js reference when changing the custom runtime.
+- Preserve `src/model.ts` as the readable JAX.js architecture implementation.
 - Verify both output correctness and inference in a real WebGPU browser after runtime changes.
