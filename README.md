@@ -1,16 +1,24 @@
-<h1 align="center">Kalkulator</h1>
+# Kalkulator
 
-<p align="center">
-  <a href="https://gustofied.github.io/kalkulator/">Open Kalkulator</a>
-</p>
+<img src="public/gothic-k-scholar.png" alt="Kalkulator engraved initial" width="64" height="64">
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/kalkulator-flow-dark.svg">
-    <img src="assets/kalkulator-flow.svg" alt="Problem to Violetto to answer, using JAX.js and WebGPU entirely within your browser." width="720">
-  </picture>
-</p>
+[Open Kalkulator](https://gustofied.github.io/kalkulator/)
 
-- Runs [Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto) maths model entirely in your browser.
-- Built with [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU.
-- Local setup: `npm ci`, then `npm run dev`.
+- [Paradigma’s Limite 1B Violetto](https://huggingface.co/paradigma-inc/limite-1b-violetto) for maths, running entirely in your browser.
+- [JAX.js](https://github.com/ekzhang/jax-js) and WebGPU, with no inference server.
+- 556 MiB of quantised weights with local browser caching.
+
+## Example
+
+Add $\frac{7}{12}$ and $\frac{5}{18}$.
+
+$$
+\frac{21}{36} + \frac{10}{36} = \boxed{\frac{31}{36}}
+$$
+
+## Run locally
+
+```sh
+npm ci
+npm run dev
+```
